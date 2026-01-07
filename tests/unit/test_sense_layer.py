@@ -85,9 +85,9 @@ class TestGetActivity(unittest.TestCase):
         activity_bytes = activity_name.encode('utf-8')
 
         # Pack response: success[1B] + pkg_len[2B] + pkg + act_len[2B] + act
-        payload = struct.pack('<BH', 1, len(package_bytes))
+        payload = struct.pack('>BH', 1, len(package_bytes))
         payload += package_bytes
-        payload += struct.pack('<H', len(activity_bytes))
+        payload += struct.pack('>H', len(activity_bytes))
         payload += activity_bytes
 
         logger.info(f"  Simulated payload size: {len(payload)} bytes")
@@ -141,7 +141,7 @@ class TestFindNode(unittest.TestCase):
 
         # Verify payload structure
         match_type_out, return_mode_out, multi_match_out, timeout_out, query_len = \
-            struct.unpack('<BBBHH', payload[:7])
+            struct.unpack('>BBBHH', payload[:7])
 
         logger.info(f"  Decoded match_type: {match_type_out}")
         logger.info(f"  Decoded return_mode: {return_mode_out}")
@@ -168,9 +168,9 @@ class TestFindNode(unittest.TestCase):
         coords = [(540, 960), (540, 1200)]
 
         # Pack response: status[1B] + count[1B] + coords[]
-        payload = struct.pack('<BB', 1, len(coords))  # status=1 (success), count=2
+        payload = struct.pack('>BB', 1, len(coords))  # status=1 (success), count=2
         for x, y in coords:
-            payload += struct.pack('<HH', x, y)
+            payload += struct.pack('>HH', x, y)
 
         logger.info(f"  Simulated payload size: {len(payload)} bytes")
         logger.info(f"  Payload hex: {payload.hex()}")
@@ -199,9 +199,9 @@ class TestFindNode(unittest.TestCase):
         bounds = [(100, 500, 980, 650)]
 
         # Pack response: status[1B] + count[1B] + bounds[]
-        payload = struct.pack('<BB', 1, len(bounds))
+        payload = struct.pack('>BB', 1, len(bounds))
         for left, top, right, bottom in bounds:
-            payload += struct.pack('<HHHH', left, top, right, bottom)
+            payload += struct.pack('>HHHH', left, top, right, bottom)
 
         logger.info(f"  Simulated payload size: {len(payload)} bytes")
         logger.info(f"  Payload hex: {payload.hex()}")
@@ -227,7 +227,7 @@ class TestFindNode(unittest.TestCase):
         logger.info(f"{'='*70}")
 
         # Pack response: status=0 (not found), count=0
-        payload = struct.pack('<BB', 0, 0)
+        payload = struct.pack('>BB', 0, 0)
 
         logger.info(f"  Payload: {payload.hex()}")
 
@@ -270,7 +270,7 @@ class TestDumpHierarchy(unittest.TestCase):
         logger.info(f"  Payload hex: {payload.hex()}")
 
         # Verify payload: format[1B] + compress[1B] + max_depth[2B]
-        format_out, compress_out, max_depth_out = struct.unpack('<BBH', payload)
+        format_out, compress_out, max_depth_out = struct.unpack('>BBH', payload)
 
         logger.info(f"  Decoded format: {format_out}")
         logger.info(f"  Decoded compress: {compress_out}")

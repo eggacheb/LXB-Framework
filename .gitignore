@@ -139,6 +139,9 @@ cython_debug/
 # Project Specific
 # =============================================================================
 
+# Development documentation (generated during debugging)
+docs_dev/
+
 # Test output files
 tests/screenshot_test.jpg
 tests/screenshot_*.jpg

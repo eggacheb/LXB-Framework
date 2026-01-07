@@ -4,7 +4,7 @@ LXB-Link Protocol Layer - Binary First Architecture
 This module handles binary frame packing and unpacking operations with CRC32
 validation for the LXB-Link reliable UDP protocol.
 
-Frame Format (Little Endian):
+Frame Format (Big Endian / Network Byte Order):
 ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐
 │ Magic   │ Ver     │ Seq     │ Cmd     │ Len     │ Data    │ CRC32   │
 │ 2 bytes │ 1 byte  │ 4 bytes │ 1 byte  │ 2 bytes │ N bytes │ 4 bytes │
@@ -13,7 +13,7 @@ Frame Format (Little Endian):
 
 Design Principles:
 - Binary First: Reject JSON bloat, use compact binary encoding
-- Little Endian: All multi-byte fields use '<' prefix
+- Big Endian (Network Byte Order): All multi-byte fields use '>' prefix
 - String Pool: Compress repeated strings (saves 96% bandwidth)
 - Zero Copy: Design for efficient parsing
 """
@@ -171,13 +171,13 @@ class StringPool:
         """
         if not self.pool:
             # Empty dynamic pool
-            return struct.pack('<H', 0)
+            return struct.pack('>H', 0)
 
         # Sort by ID for deterministic output
         entries = sorted(self.pool.items(), key=lambda x: x[1])
 
         # Pack count
-        packed = struct.pack('<H', len(entries))
+        packed = struct.pack('>H', len(entries))
 
         # Pack each entry
         for string, str_id in entries:
@@ -188,7 +188,7 @@ class StringPool:
                 )
 
             # Pack: str_id[uint8] + str_len[uint8] + str_data
-            packed += struct.pack('<BB', str_id, len(encoded))
+            packed += struct.pack('>BB', str_id, len(encoded))
             packed += encoded
 
         return packed
@@ -217,7 +217,7 @@ class StringPool:
         offset = 0
 
         # Unpack count
-        count = struct.unpack('<H', data[offset:offset+2])[0]
+        count = struct.unpack('>H', data[offset:offset+2])[0]
         offset += 2
 
         # Unpack each entry
@@ -228,7 +228,7 @@ class StringPool:
                     ERR_INVALID_PAYLOAD_SIZE
                 )
 
-            str_id, str_len = struct.unpack('<BB', data[offset:offset+2])
+            str_id, str_len = struct.unpack('>BB', data[offset:offset+2])
             offset += 2
 
             if offset + str_len > len(data):
@@ -263,17 +263,17 @@ class ProtocolFrame:
     and parse received frames with comprehensive validation.
     """
 
-    # Struct format for frame header (Little Endian)
+    # Struct format for frame header (Big Endian)
     # H: unsigned short (2 bytes) - Magic
     # B: unsigned char (1 byte) - Version
     # I: unsigned int (4 bytes) - Sequence
     # B: unsigned char (1 byte) - Command
     # H: unsigned short (2 bytes) - Payload Length
-    HEADER_FORMAT = '<HBIBH'
+    HEADER_FORMAT = '>HBIBH'
 
-    # Struct format for CRC32 (Little Endian)
+    # Struct format for CRC32 (Big Endian)
     # I: unsigned int (4 bytes) - CRC32
-    CRC_FORMAT = '<I'
+    CRC_FORMAT = '>I'
 
     @staticmethod
     def pack(seq: int, cmd: int, payload: bytes = b'') -> bytes:
@@ -405,8 +405,8 @@ class ProtocolFrame:
         """
         from .constants import CMD_TAP
 
-        # Pack coordinates as two uint16 (Little Endian)
-        payload = struct.pack('<HH', x, y)
+        # Pack coordinates as two uint16 (Big Endian)
+        payload = struct.pack('>HH', x, y)
         return ProtocolFrame.pack(seq, CMD_TAP, payload)
 
     @staticmethod
@@ -429,7 +429,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        x, y = struct.unpack('<HH', payload)
+        x, y = struct.unpack('>HH', payload)
         return x, y
 
     @staticmethod
@@ -486,7 +486,7 @@ class ProtocolFrame:
         """
         from .constants import CMD_IMG_META
 
-        payload = struct.pack('<IIH', img_id, total_size, num_chunks)
+        payload = struct.pack('>IIH', img_id, total_size, num_chunks)
         return ProtocolFrame.pack(seq, CMD_IMG_META, payload)
 
     @staticmethod
@@ -506,7 +506,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        img_id, total_size, num_chunks = struct.unpack('<IIH', payload)
+        img_id, total_size, num_chunks = struct.unpack('>IIH', payload)
         return img_id, total_size, num_chunks
 
     @staticmethod
@@ -526,7 +526,7 @@ class ProtocolFrame:
         """
         from .constants import CMD_IMG_CHUNK
 
-        payload = struct.pack('<H', chunk_index) + chunk_data
+        payload = struct.pack('>H', chunk_index) + chunk_data
         return ProtocolFrame.pack(seq, CMD_IMG_CHUNK, payload)
 
     @staticmethod
@@ -546,7 +546,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        chunk_index = struct.unpack('<H', payload[:2])[0]
+        chunk_index = struct.unpack('>H', payload[:2])[0]
         chunk_data = payload[2:]
         return chunk_index, chunk_data
 
@@ -568,7 +568,7 @@ class ProtocolFrame:
 
         count = len(missing_indices)
         # Pack: count + array of indices
-        payload = struct.pack('<H', count) + struct.pack(f'<{count}H', *missing_indices)
+        payload = struct.pack('>H', count) + struct.pack(f'>{count}H', *missing_indices)
         return ProtocolFrame.pack(seq, CMD_IMG_MISSING, payload)
 
     @staticmethod
@@ -588,7 +588,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        count = struct.unpack('<H', payload[:2])[0]
+        count = struct.unpack('>H', payload[:2])[0]
         if len(payload) != 2 + count * 2:
             raise LXBProtocolError(
                 f"IMG_MISSING payload size mismatch: expected {2 + count * 2}, got {len(payload)}",
@@ -598,7 +598,7 @@ class ProtocolFrame:
         if count == 0:
             return []
 
-        indices = struct.unpack(f'<{count}H', payload[2:])
+        indices = struct.unpack(f'>{count}H', payload[2:])
         return list(indices)
 
     # =========================================================================
@@ -646,11 +646,11 @@ class ProtocolFrame:
         offset = 0
 
         # Unpack success flag
-        success = struct.unpack('<B', payload[offset:offset+1])[0]
+        success = struct.unpack('>B', payload[offset:offset+1])[0]
         offset += 1
 
         # Unpack package name
-        package_len = struct.unpack('<H', payload[offset:offset+2])[0]
+        package_len = struct.unpack('>H', payload[offset:offset+2])[0]
         offset += 2
 
         if offset + package_len > len(payload):
@@ -669,7 +669,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        activity_len = struct.unpack('<H', payload[offset:offset+2])[0]
+        activity_len = struct.unpack('>H', payload[offset:offset+2])[0]
         offset += 2
 
         if offset + activity_len > len(payload):
@@ -706,7 +706,7 @@ class ProtocolFrame:
 
         # Pack request: match_type[1B] + return_mode[1B] + multi_match[1B] +
         #               timeout_ms[2B] + query_len[2B] + query_str[UTF-8]
-        payload = struct.pack('<BBBHH',
+        payload = struct.pack('>BBBHH',
             match_type,
             return_mode,
             1 if multi_match else 0,
@@ -743,7 +743,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        status, count = struct.unpack('<BB', payload[:2])
+        status, count = struct.unpack('>BB', payload[:2])
 
         if len(payload) != 2 + count * 4:
             raise LXBProtocolError(
@@ -754,7 +754,7 @@ class ProtocolFrame:
         coords = []
         offset = 2
         for _ in range(count):
-            x, y = struct.unpack('<HH', payload[offset:offset+4])
+            x, y = struct.unpack('>HH', payload[offset:offset+4])
             coords.append((x, y))
             offset += 4
 
@@ -782,7 +782,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        status, count = struct.unpack('<BB', payload[:2])
+        status, count = struct.unpack('>BB', payload[:2])
 
         if len(payload) != 2 + count * 8:
             raise LXBProtocolError(
@@ -793,7 +793,7 @@ class ProtocolFrame:
         boxes = []
         offset = 2
         for _ in range(count):
-            left, top, right, bottom = struct.unpack('<HHHH', payload[offset:offset+8])
+            left, top, right, bottom = struct.unpack('>HHHH', payload[offset:offset+8])
             boxes.append((left, top, right, bottom))
             offset += 8
 
@@ -842,7 +842,7 @@ class ProtocolFrame:
 
         # Pack: method[1B] + flags[1B] + target_x[2B] + target_y[2B] +
         #       delay_ms[2B] + text_len[2B] + text[UTF-8]
-        payload = struct.pack('<BBHHHH',
+        payload = struct.pack('>BBHHHH',
             method,
             flags,
             target_x,
@@ -878,7 +878,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        status, actual_method = struct.unpack('<BB', payload)
+        status, actual_method = struct.unpack('>BB', payload)
         return status, actual_method
 
     @staticmethod
@@ -898,7 +898,7 @@ class ProtocolFrame:
         from .constants import CMD_KEY_EVENT
 
         # Pack: keycode[1B] + action[1B] + meta_state[4B]
-        payload = struct.pack('<BBI', keycode, action, meta_state)
+        payload = struct.pack('>BBI', keycode, action, meta_state)
 
         return ProtocolFrame.pack(seq, CMD_KEY_EVENT, payload)
 
@@ -919,7 +919,7 @@ class ProtocolFrame:
                 ERR_INVALID_PAYLOAD_SIZE
             )
 
-        keycode, action, meta_state = struct.unpack('<BBI', payload)
+        keycode, action, meta_state = struct.unpack('>BBI', payload)
         return keycode, action, meta_state
 
     # =========================================================================
@@ -944,7 +944,7 @@ class ProtocolFrame:
         from .constants import CMD_DUMP_HIERARCHY
 
         # Pack: format[1B] + compress[1B] + max_depth[2B]
-        payload = struct.pack('<BBH', format, compress, max_depth)
+        payload = struct.pack('>BBH', format, compress, max_depth)
         return ProtocolFrame.pack(seq, CMD_DUMP_HIERARCHY, payload)
 
     @staticmethod
@@ -975,7 +975,7 @@ class ProtocolFrame:
 
         # Unpack header (14 bytes)
         version, compress, original_size, compressed_size, node_count, string_pool_size = \
-            struct.unpack('<BBIIHH', payload[offset:offset+14])
+            struct.unpack('>BBIIHH', payload[offset:offset+14])
         offset += 14
 
         # Decompress if needed
@@ -1029,7 +1029,7 @@ class ProtocolFrame:
             # Unpack node structure (15 bytes)
             parent_index, child_count, flags, \
                 left, top, right, bottom, \
-                class_id, text_id, res_id, desc_id = struct.unpack('<BBBHHHHBBBB', data[data_offset:data_offset+15])
+                class_id, text_id, res_id, desc_id = struct.unpack('>BBBHHHHBBBB', data[data_offset:data_offset+15])
             data_offset += 15
 
             # Decode strings using pool
@@ -1145,7 +1145,7 @@ class ProtocolFrame:
             parent_index = parent_idx if parent_idx is not None else 0xFF
 
             # Pack node (15 bytes fixed)
-            nodes_data += struct.pack('<BBBHHHHBBBB',
+            nodes_data += struct.pack('>BBBHHHHBBBB',
                 parent_index,
                 node.get('child_count', 0),
                 flags,
@@ -1166,7 +1166,7 @@ class ProtocolFrame:
         compressed_size = len(compressed_data)
 
         # Pack header
-        header = struct.pack('<BBIIHH',
+        header = struct.pack('>BBIIHH',
             0x01,                   # version
             0x01,                   # compress (zlib)
             original_size,          # original_size

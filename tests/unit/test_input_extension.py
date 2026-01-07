@@ -72,7 +72,7 @@ class TestInputText(unittest.TestCase):
         # Verify payload structure: method[1B] + flags[1B] + target_x[2B] +
         #                            target_y[2B] + delay_ms[2B] + text_len[2B] + text[]
         method_out, flags, target_x, target_y, delay_ms, text_len = \
-            struct.unpack('<BBHHHH', payload[:10])
+            struct.unpack('>BBHHHH', payload[:10])
 
         text_bytes = payload[10:10+text_len]
         text_out = text_bytes.decode('utf-8')
@@ -110,7 +110,7 @@ class TestInputText(unittest.TestCase):
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
         method_out, flags, target_x, target_y, delay_ms, text_len = \
-            struct.unpack('<BBHHHH', payload[:10])
+            struct.unpack('>BBHHHH', payload[:10])
 
         text_out = payload[10:10+text_len].decode('utf-8')
 
@@ -151,7 +151,7 @@ class TestInputText(unittest.TestCase):
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
         method_out, flags, target_x, target_y, delay_ms, text_len = \
-            struct.unpack('<BBHHHH', payload[:10])
+            struct.unpack('>BBHHHH', payload[:10])
 
         logger.info(f"  Decoded flags: 0x{flags:02X}")
         logger.info(f"    CLEAR_FIRST: {bool(flags & INPUT_FLAG_CLEAR_FIRST)}")
@@ -180,7 +180,7 @@ class TestInputText(unittest.TestCase):
         status = 1  # Success
         actual_method = INPUT_METHOD_CLIPBOARD
 
-        payload = struct.pack('<BB', status, actual_method)
+        payload = struct.pack('>BB', status, actual_method)
 
         logger.info(f"  Simulated payload: {payload.hex()}")
 
@@ -213,7 +213,7 @@ class TestInputText(unittest.TestCase):
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
         method_out, flags, target_x, target_y, delay_ms, text_len = \
-            struct.unpack('<BBHHHH', payload[:10])
+            struct.unpack('>BBHHHH', payload[:10])
 
         logger.info(f"  Decoded text_len: {text_len}")
 
@@ -251,7 +251,7 @@ class TestKeyEvent(unittest.TestCase):
         # Verify payload: keycode[1B] + action[1B] + meta_state[4B]
         self.assertEqual(len(payload), 6)
 
-        keycode_out, action_out, meta_state = struct.unpack('<BBI', payload)
+        keycode_out, action_out, meta_state = struct.unpack('>BBI', payload)
 
         logger.info(f"  Decoded keycode: {keycode_out}")
         logger.info(f"  Decoded action: {action_out}")
@@ -279,7 +279,7 @@ class TestKeyEvent(unittest.TestCase):
         # Unpack
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
-        keycode_out, action_out, meta_state = struct.unpack('<BBI', payload)
+        keycode_out, action_out, meta_state = struct.unpack('>BBI', payload)
 
         logger.info(f"  Decoded keycode: {keycode_out}")
         logger.info(f"  Decoded action: {action_out} (default: 2)")
@@ -303,7 +303,7 @@ class TestKeyEvent(unittest.TestCase):
         # Unpack
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
-        keycode_out, action_out, meta_state = struct.unpack('<BBI', payload)
+        keycode_out, action_out, meta_state = struct.unpack('>BBI', payload)
 
         logger.info(f"  Keycode: {keycode_out} (KEY_ENTER = {KEY_ENTER})")
 
@@ -325,7 +325,7 @@ class TestKeyEvent(unittest.TestCase):
         # Unpack
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
-        keycode_out, action_out, meta_state = struct.unpack('<BBI', payload)
+        keycode_out, action_out, meta_state = struct.unpack('>BBI', payload)
 
         logger.info(f"  Keycode: {keycode_out} (KEY_DELETE = {KEY_DELETE})")
 
@@ -352,7 +352,7 @@ class TestKeyEvent(unittest.TestCase):
         # Unpack
         seq_out, cmd, payload = ProtocolFrame.unpack(frame)
 
-        keycode_out, action_out, meta_out = struct.unpack('<BBI', payload)
+        keycode_out, action_out, meta_out = struct.unpack('>BBI', payload)
 
         logger.info(f"  Decoded meta_state: 0x{meta_out:08X}")
 
@@ -371,7 +371,7 @@ class TestKeyEvent(unittest.TestCase):
         action = 0  # Key down
         meta_state = 0
 
-        payload = struct.pack('<BBI', keycode, action, meta_state)
+        payload = struct.pack('>BBI', keycode, action, meta_state)
 
         logger.info(f"  Simulated payload: {payload.hex()}")
 
