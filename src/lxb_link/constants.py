@@ -79,7 +79,8 @@ CMD_LONG_PRESS = 0x12   # Long press (new)
 CMD_MULTI_TOUCH = 0x13  # Multi-point touch (new)
 CMD_GESTURE = 0x14      # Complex gesture (pinch/rotate) (new)
 CMD_WAKE = 0x1A         # Wake/unlock device (migrated from 0x0A)
-# 0x15-0x19, 0x1B-0x1F: Reserved
+CMD_UNLOCK = 0x1B       # Slide to unlock (no password) ⭐
+# 0x15-0x19, 0x1C-0x1F: Reserved
 
 # -----------------------------------------------------------------------------
 # Input Extension (0x20-0x2F) - Advanced Input
@@ -98,7 +99,9 @@ CMD_FIND_NODE = 0x32       # Find node with computation offloading (new)
 CMD_GET_FOCUSED = 0x33     # Get focused element (new)
 CMD_WAIT_FOR = 0x34        # Wait for element to appear (new)
 CMD_OCR_REGION = 0x35      # OCR on device (new)
-# 0x36-0x3F: Reserved for AI enhancements
+CMD_GET_SCREEN_STATE = 0x36  # Get screen state (off/on/locked) ⭐
+CMD_GET_SCREEN_SIZE = 0x37   # Get screen size and density ⭐
+# 0x38-0x3F: Reserved for AI enhancements
 
 # -----------------------------------------------------------------------------
 # Lifecycle Layer (0x40-0x4F) - Application Management
@@ -106,10 +109,12 @@ CMD_OCR_REGION = 0x35      # OCR on device (new)
 CMD_RESTART_APP = 0x40     # Restart application (new)
 CMD_GET_CLIPBOARD = 0x41   # Get clipboard content (new)
 CMD_SET_CLIPBOARD = 0x42   # Set clipboard content (new)
-CMD_INSTALL_APK = 0x43     # Install application (new)
-CMD_UNINSTALL = 0x44       # Uninstall application (new)
+CMD_LAUNCH_APP = 0x43      # Launch application ⭐
+CMD_STOP_APP = 0x44        # Force stop application ⭐
 CMD_CLEAR_DATA = 0x45      # Clear app data (new)
-# 0x46-0x4F: Reserved
+CMD_INSTALL_APK = 0x46     # Install application (new)
+CMD_UNINSTALL = 0x47       # Uninstall application (new)
+# 0x48-0x4F: Reserved
 
 # -----------------------------------------------------------------------------
 # Debug Layer (0x50-0x5F) - Debugging Tools
@@ -191,6 +196,12 @@ CHANNEL_MAP = {
     CMD_FIND_NODE: CH_CONTROL,
     CMD_GET_ACTIVITY: CH_CONTROL,
     CMD_INPUT_TEXT: CH_CONTROL,
+    CMD_UNLOCK: CH_CONTROL,
+    CMD_WAKE: CH_CONTROL,
+    CMD_LAUNCH_APP: CH_CONTROL,
+    CMD_STOP_APP: CH_CONTROL,
+    CMD_GET_SCREEN_STATE: CH_CONTROL,
+    CMD_GET_SCREEN_SIZE: CH_CONTROL,
 
     # Data Channel (large data transfer)
     CMD_DUMP_HIERARCHY: CH_DATA,
@@ -422,6 +433,21 @@ INPUT_METHOD_ACCESSIBILITY = 2  # Accessibility service (best compatibility)
 INPUT_FLAG_CLEAR_FIRST = 0x01       # Clear existing text before input
 INPUT_FLAG_PRESS_ENTER = 0x02       # Press ENTER after input
 INPUT_FLAG_HIDE_KEYBOARD = 0x04     # Hide keyboard after input
+
+# =============================================================================
+# LAUNCH_APP Flags
+# =============================================================================
+
+LAUNCH_FLAG_CLEAR_TASK = 0x01       # Clear task stack before launch
+LAUNCH_FLAG_WAIT = 0x02             # Wait for Activity to fully launch
+
+# =============================================================================
+# Screen State Constants
+# =============================================================================
+
+SCREEN_STATE_OFF = 0            # Screen is off
+SCREEN_STATE_ON_UNLOCKED = 1    # Screen is on and unlocked
+SCREEN_STATE_ON_LOCKED = 2      # Screen is on but locked
 
 # =============================================================================
 # DUMP_HIERARCHY Formats

@@ -1,0 +1,1207 @@
+package com.lxb.server.system;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+
+/**
+ * UiAutomation 系统层封装 (纯反射实现)
+ *
+ * 通过 app_process 环境访问 Android UiAutomation API，
+ * 所有 Android SDK 类都通过反射访问，避免编译时依赖。
+ *
+ * 必须在调用前先执行 HiddenApiBypass.bypass()
+ */
+public class UiAutomationWrapper {
+
+    private static final String TAG = "[LXB][UiAuto]";
+
+    // 反射获取的 UiAutomation 实例
+    private Object uiAutomation;
+
+    // 缓存的反射方法
+    private Method injectInputEventMethod;
+    private Method getRootInActiveWindowMethod;
+    private Method getServiceInfoMethod;
+    private Method setServiceInfoMethod;
+
+    // MotionEvent 相关
+    private Class<?> motionEventClass;
+    private Method motionEventObtainMethod;
+    private Method motionEventRecycleMethod;
+    private Method motionEventSetSourceMethod;
+    private int ACTION_DOWN;
+    private int ACTION_UP;
+    private int ACTION_MOVE;
+    private int SOURCE_TOUCHSCREEN;
+
+    // KeyEvent 相关
+    private Class<?> keyEventClass;
+    private Constructor<?> keyEventConstructor;
+    private int KEY_ACTION_DOWN;
+    private int KEY_ACTION_UP;
+    private int KEYCODE_WAKEUP;
+    private int KEYCODE_BACK;
+    private int KEYCODE_HOME;
+    private int KEYCODE_ENTER;
+    private int KEYCODE_DEL;
+    private int KEYCODE_A;
+    private int KEYCODE_V;
+    private int META_CTRL_ON;
+    private int SOURCE_KEYBOARD;
+    private int VIRTUAL_KEYBOARD;
+
+    // 屏幕尺寸缓存
+    private int screenWidth = 0;
+    private int screenHeight = 0;
+    private int screenDensity = 0;
+
+    /**
+     * 初始化 UiAutomation
+     *
+     * @throws Exception 初始化失败
+     */
+    public void initialize() throws Exception {
+        System.out.println(TAG + " Initializing...");
+
+        // 初始化反射常量
+        initReflectionConstants();
+
+        // 准备 Looper
+        prepareLooper();
+
+        // 获取 UiAutomation 实例
+        this.uiAutomation = createUiAutomation();
+        if (this.uiAutomation == null) {
+            throw new RuntimeException("Failed to obtain UiAutomation instance");
+        }
+
+        // 缓存常用方法
+        cacheReflectionMethods();
+
+        // 获取屏幕信息
+        fetchScreenInfo();
+
+        System.out.println(TAG + " Initialized successfully");
+        System.out.println(TAG + " Screen: " + screenWidth + "x" + screenHeight + " @" + screenDensity + "dpi");
+    }
+
+    /**
+     * 初始化反射常量
+     */
+    private void initReflectionConstants() throws Exception {
+        // MotionEvent 常量
+        motionEventClass = Class.forName("android.view.MotionEvent");
+        ACTION_DOWN = motionEventClass.getField("ACTION_DOWN").getInt(null);
+        ACTION_UP = motionEventClass.getField("ACTION_UP").getInt(null);
+        ACTION_MOVE = motionEventClass.getField("ACTION_MOVE").getInt(null);
+
+        motionEventObtainMethod = motionEventClass.getMethod("obtain",
+                long.class, long.class, int.class, float.class, float.class, int.class);
+        motionEventRecycleMethod = motionEventClass.getMethod("recycle");
+        motionEventSetSourceMethod = motionEventClass.getMethod("setSource", int.class);
+
+        // InputDevice 常量
+        Class<?> inputDeviceClass = Class.forName("android.view.InputDevice");
+        SOURCE_TOUCHSCREEN = inputDeviceClass.getField("SOURCE_TOUCHSCREEN").getInt(null);
+        SOURCE_KEYBOARD = inputDeviceClass.getField("SOURCE_KEYBOARD").getInt(null);
+
+        // KeyEvent 常量
+        keyEventClass = Class.forName("android.view.KeyEvent");
+        KEY_ACTION_DOWN = keyEventClass.getField("ACTION_DOWN").getInt(null);
+        KEY_ACTION_UP = keyEventClass.getField("ACTION_UP").getInt(null);
+        KEYCODE_WAKEUP = keyEventClass.getField("KEYCODE_WAKEUP").getInt(null);
+        KEYCODE_BACK = keyEventClass.getField("KEYCODE_BACK").getInt(null);
+        KEYCODE_HOME = keyEventClass.getField("KEYCODE_HOME").getInt(null);
+        KEYCODE_ENTER = keyEventClass.getField("KEYCODE_ENTER").getInt(null);
+        KEYCODE_DEL = keyEventClass.getField("KEYCODE_DEL").getInt(null);
+        KEYCODE_A = keyEventClass.getField("KEYCODE_A").getInt(null);
+        KEYCODE_V = keyEventClass.getField("KEYCODE_V").getInt(null);
+        META_CTRL_ON = keyEventClass.getField("META_CTRL_ON").getInt(null);
+
+        // KeyCharacterMap 常量
+        Class<?> keyCharMapClass = Class.forName("android.view.KeyCharacterMap");
+        VIRTUAL_KEYBOARD = keyCharMapClass.getField("VIRTUAL_KEYBOARD").getInt(null);
+
+        // KeyEvent 构造函数
+        keyEventConstructor = keyEventClass.getConstructor(
+                long.class, long.class, int.class, int.class, int.class, int.class,
+                int.class, int.class, int.class, int.class);
+
+        System.out.println(TAG + " Reflection constants initialized");
+    }
+
+    /**
+     * 准备 Looper
+     */
+    private void prepareLooper() throws Exception {
+        Class<?> looperClass = Class.forName("android.os.Looper");
+        Method myLooper = looperClass.getMethod("myLooper");
+        Object looper = myLooper.invoke(null);
+
+        if (looper == null) {
+            Method prepareMainLooper = looperClass.getMethod("prepareMainLooper");
+            prepareMainLooper.invoke(null);
+            System.out.println(TAG + " Looper prepared");
+        }
+    }
+
+    /**
+     * 创建 UiAutomation 实例
+     */
+    private Object createUiAutomation() throws Exception {
+        // 方法 1: 通过 Instrumentation 获取
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Method systemMain = activityThread.getMethod("systemMain");
+            Object thread = systemMain.invoke(null);
+
+            Field instrumentationField = activityThread.getDeclaredField("mInstrumentation");
+            instrumentationField.setAccessible(true);
+            Object instrumentation = instrumentationField.get(thread);
+
+            if (instrumentation != null) {
+                Method getUiAutomation = instrumentation.getClass().getMethod("getUiAutomation");
+                Object ua = getUiAutomation.invoke(instrumentation);
+                if (ua != null) {
+                    System.out.println(TAG + " Got UiAutomation via Instrumentation");
+                    return ua;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println(TAG + " Instrumentation method failed: " + e.getMessage());
+        }
+
+        // 方法 2: 通过 UiAutomationConnection 直接创建
+        try {
+            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+            Method getService = serviceManager.getMethod("getService", String.class);
+            Object binder = getService.invoke(null, "uiautomation");
+
+            if (binder != null) {
+                Class<?> stubClass = Class.forName("android.app.IUiAutomationConnection$Stub");
+                Method asInterface = stubClass.getMethod("asInterface",
+                        Class.forName("android.os.IBinder"));
+                Object connection = asInterface.invoke(null, binder);
+
+                if (connection != null) {
+                    Class<?> uiAutoClass = Class.forName("android.app.UiAutomation");
+                    Class<?> looperClass = Class.forName("android.os.Looper");
+                    Class<?> connClass = Class.forName("android.app.IUiAutomationConnection");
+
+                    Constructor<?> constructor = uiAutoClass.getDeclaredConstructor(
+                            looperClass, connClass);
+                    constructor.setAccessible(true);
+
+                    Method myLooper = looperClass.getMethod("myLooper");
+                    Object looper = myLooper.invoke(null);
+
+                    Object ua = constructor.newInstance(looper, connection);
+                    System.out.println(TAG + " Got UiAutomation via direct creation");
+                    return ua;
+                }
+            }
+        } catch (Exception e) {
+            System.err.println(TAG + " Direct creation failed: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    /**
+     * 缓存反射方法
+     */
+    private void cacheReflectionMethods() throws Exception {
+        Class<?> uiAutoClass = uiAutomation.getClass();
+        Class<?> inputEventClass = Class.forName("android.view.InputEvent");
+
+        injectInputEventMethod = uiAutoClass.getMethod("injectInputEvent", inputEventClass, boolean.class);
+        getRootInActiveWindowMethod = uiAutoClass.getMethod("getRootInActiveWindow");
+
+        try {
+            getServiceInfoMethod = uiAutoClass.getMethod("getServiceInfo");
+            setServiceInfoMethod = uiAutoClass.getMethod("setServiceInfo",
+                    Class.forName("android.accessibilityservice.AccessibilityServiceInfo"));
+        } catch (NoSuchMethodException e) {
+            // 某些版本可能没有这些方法
+        }
+    }
+
+    /**
+     * 获取屏幕信息
+     */
+    private void fetchScreenInfo() {
+        try {
+            Process process = Runtime.getRuntime().exec("wm size");
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                System.out.println(TAG + " wm size output: " + line);
+                // 支持多种格式: "Physical size: 1080x1920" 或 "Override size: 1080x1920"
+                if (line.contains("x")) {
+                    // 找到数字x数字的模式
+                    String[] parts = line.split("\\s+");
+                    for (String part : parts) {
+                        if (part.matches("\\d+x\\d+")) {
+                            String[] dims = part.split("x");
+                            screenWidth = Integer.parseInt(dims[0]);
+                            screenHeight = Integer.parseInt(dims[1]);
+                            break;
+                        }
+                    }
+                }
+            }
+            reader.close();
+            process.waitFor();
+
+            process = Runtime.getRuntime().exec("wm density");
+            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            while ((line = reader.readLine()) != null) {
+                System.out.println(TAG + " wm density output: " + line);
+                // 支持: "Physical density: 480" 或 "Override density: 480"
+                String[] parts = line.split("\\s+");
+                for (String part : parts) {
+                    if (part.matches("\\d+")) {
+                        screenDensity = Integer.parseInt(part);
+                    }
+                }
+            }
+            reader.close();
+            process.waitFor();
+
+        } catch (Exception e) {
+            System.err.println(TAG + " Failed to get screen info: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // 如果解析失败，使用默认值
+        if (screenWidth == 0 || screenHeight == 0) {
+            System.out.println(TAG + " Using default screen size");
+            screenWidth = 1080;
+            screenHeight = 2400;
+            screenDensity = 440;
+        }
+    }
+
+    /**
+     * 获取系统时间 (毫秒)
+     */
+    private long uptimeMillis() {
+        try {
+            Class<?> systemClock = Class.forName("android.os.SystemClock");
+            Method uptimeMillis = systemClock.getMethod("uptimeMillis");
+            return (Long) uptimeMillis.invoke(null);
+        } catch (Exception e) {
+            return System.currentTimeMillis();
+        }
+    }
+
+    // =========================================================================
+    // 输入注入
+    // =========================================================================
+
+    /**
+     * 点击屏幕
+     */
+    public boolean click(int x, int y) {
+        // 优先使用 UiAutomation
+        if (injectInputEventMethod != null && uiAutomation != null) {
+            try {
+                long downTime = uptimeMillis();
+
+                Object down = motionEventObtainMethod.invoke(null,
+                        downTime, downTime, ACTION_DOWN, (float) x, (float) y, 0);
+                motionEventSetSourceMethod.invoke(down, SOURCE_TOUCHSCREEN);
+
+                Object up = motionEventObtainMethod.invoke(null,
+                        downTime, downTime + 50, ACTION_UP, (float) x, (float) y, 0);
+                motionEventSetSourceMethod.invoke(up, SOURCE_TOUCHSCREEN);
+
+                boolean result = (Boolean) injectInputEventMethod.invoke(uiAutomation, down, true) &&
+                        (Boolean) injectInputEventMethod.invoke(uiAutomation, up, true);
+
+                motionEventRecycleMethod.invoke(down);
+                motionEventRecycleMethod.invoke(up);
+
+                if (result) {
+                    System.out.println(TAG + " Click (" + x + ", " + y + "): OK (UiAutomation)");
+                    return true;
+                }
+            } catch (Exception e) {
+                System.err.println(TAG + " UiAutomation click failed: " + e.getMessage());
+            }
+        }
+
+        // 后备方案：使用 input 命令
+        return clickViaShell(x, y);
+    }
+
+    /**
+     * 通过 shell 命令点击（后备方案）
+     */
+    private boolean clickViaShell(int x, int y) {
+        try {
+            Process process = Runtime.getRuntime().exec("input tap " + x + " " + y);
+            int exitCode = process.waitFor();
+            boolean result = exitCode == 0;
+            System.out.println(TAG + " Click (" + x + ", " + y + "): " + (result ? "OK" : "FAIL") + " (shell)");
+            return result;
+        } catch (Exception e) {
+            System.err.println(TAG + " Shell click failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 滑动手势
+     */
+    public boolean swipe(int x1, int y1, int x2, int y2, int duration) {
+        // 优先使用 UiAutomation
+        if (injectInputEventMethod != null && uiAutomation != null) {
+            try {
+                long downTime = uptimeMillis();
+                int steps = Math.max(2, duration / 16);
+
+                Object down = motionEventObtainMethod.invoke(null,
+                        downTime, downTime, ACTION_DOWN, (float) x1, (float) y1, 0);
+                motionEventSetSourceMethod.invoke(down, SOURCE_TOUCHSCREEN);
+
+                if (!(Boolean) injectInputEventMethod.invoke(uiAutomation, down, true)) {
+                    motionEventRecycleMethod.invoke(down);
+                    // 尝试后备方案
+                    return swipeViaShell(x1, y1, x2, y2, duration);
+                }
+                motionEventRecycleMethod.invoke(down);
+
+                for (int i = 1; i < steps; i++) {
+                    float t = (float) i / steps;
+                    int x = (int) (x1 + (x2 - x1) * t);
+                    int y = (int) (y1 + (y2 - y1) * t);
+                    long eventTime = downTime + (long) (duration * t);
+
+                    Object move = motionEventObtainMethod.invoke(null,
+                            downTime, eventTime, ACTION_MOVE, (float) x, (float) y, 0);
+                    motionEventSetSourceMethod.invoke(move, SOURCE_TOUCHSCREEN);
+                    injectInputEventMethod.invoke(uiAutomation, move, true);
+                    motionEventRecycleMethod.invoke(move);
+
+                    Thread.sleep(duration / steps);
+                }
+
+                Object up = motionEventObtainMethod.invoke(null,
+                        downTime, downTime + duration, ACTION_UP, (float) x2, (float) y2, 0);
+                motionEventSetSourceMethod.invoke(up, SOURCE_TOUCHSCREEN);
+                boolean result = (Boolean) injectInputEventMethod.invoke(uiAutomation, up, true);
+                motionEventRecycleMethod.invoke(up);
+
+                if (result) {
+                    System.out.println(TAG + " Swipe: OK (UiAutomation)");
+                    return true;
+                }
+            } catch (Exception e) {
+                System.err.println(TAG + " UiAutomation swipe failed: " + e.getMessage());
+            }
+        }
+
+        // 后备方案
+        return swipeViaShell(x1, y1, x2, y2, duration);
+    }
+
+    /**
+     * 通过 shell 命令滑动（后备方案）
+     */
+    private boolean swipeViaShell(int x1, int y1, int x2, int y2, int duration) {
+        try {
+            String cmd = "input swipe " + x1 + " " + y1 + " " + x2 + " " + y2 + " " + duration;
+            Process process = Runtime.getRuntime().exec(cmd);
+            int exitCode = process.waitFor();
+            boolean result = exitCode == 0;
+            System.out.println(TAG + " Swipe: " + (result ? "OK" : "FAIL") + " (shell)");
+            return result;
+        } catch (Exception e) {
+            System.err.println(TAG + " Shell swipe failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 长按
+     */
+    public boolean longPress(int x, int y, int duration) {
+        // 优先使用 UiAutomation
+        if (injectInputEventMethod != null && uiAutomation != null) {
+            try {
+                long downTime = uptimeMillis();
+
+                Object down = motionEventObtainMethod.invoke(null,
+                        downTime, downTime, ACTION_DOWN, (float) x, (float) y, 0);
+                motionEventSetSourceMethod.invoke(down, SOURCE_TOUCHSCREEN);
+
+                if (!(Boolean) injectInputEventMethod.invoke(uiAutomation, down, true)) {
+                    motionEventRecycleMethod.invoke(down);
+                    return longPressViaShell(x, y, duration);
+                }
+                motionEventRecycleMethod.invoke(down);
+
+                Thread.sleep(duration);
+
+                Object up = motionEventObtainMethod.invoke(null,
+                        downTime, downTime + duration, ACTION_UP, (float) x, (float) y, 0);
+                motionEventSetSourceMethod.invoke(up, SOURCE_TOUCHSCREEN);
+                boolean result = (Boolean) injectInputEventMethod.invoke(uiAutomation, up, true);
+                motionEventRecycleMethod.invoke(up);
+
+                if (result) {
+                    System.out.println(TAG + " LongPress (" + x + ", " + y + ", " + duration + "ms): OK (UiAutomation)");
+                    return true;
+                }
+            } catch (Exception e) {
+                System.err.println(TAG + " UiAutomation longPress failed: " + e.getMessage());
+            }
+        }
+
+        return longPressViaShell(x, y, duration);
+    }
+
+    /**
+     * 通过 shell 命令长按（后备方案）
+     */
+    private boolean longPressViaShell(int x, int y, int duration) {
+        try {
+            // input swipe with same start/end point = long press
+            String cmd = "input swipe " + x + " " + y + " " + x + " " + y + " " + duration;
+            Process process = Runtime.getRuntime().exec(cmd);
+            int exitCode = process.waitFor();
+            boolean result = exitCode == 0;
+            System.out.println(TAG + " LongPress (" + x + ", " + y + ", " + duration + "ms): " + (result ? "OK" : "FAIL") + " (shell)");
+            return result;
+        } catch (Exception e) {
+            System.err.println(TAG + " Shell longPress failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 注入按键事件
+     *
+     * @param keycode Android KeyEvent 码
+     * @param action 动作: 0=DOWN, 1=UP, 2=CLICK
+     * @param metaState 修饰键状态
+     * @return 是否成功
+     */
+    public boolean injectKeyEvent(int keycode, int action, int metaState) {
+        // 优先使用 UiAutomation
+        if (injectInputEventMethod != null && uiAutomation != null && keyEventConstructor != null) {
+            try {
+                long now = uptimeMillis();
+
+                if (action == 2) {  // CLICK = DOWN + UP
+                    Object down = keyEventConstructor.newInstance(
+                            now, now, KEY_ACTION_DOWN, keycode, 0, metaState,
+                            VIRTUAL_KEYBOARD, 0, 0, SOURCE_KEYBOARD);
+                    Object up = keyEventConstructor.newInstance(
+                            now, now + 50, KEY_ACTION_UP, keycode, 0, metaState,
+                            VIRTUAL_KEYBOARD, 0, 0, SOURCE_KEYBOARD);
+                    boolean result = (Boolean) injectInputEventMethod.invoke(uiAutomation, down, true) &&
+                            (Boolean) injectInputEventMethod.invoke(uiAutomation, up, true);
+                    if (result) {
+                        System.out.println(TAG + " KeyEvent " + keycode + ": OK (UiAutomation)");
+                        return true;
+                    }
+                } else {
+                    Object event = keyEventConstructor.newInstance(
+                            now, now, action, keycode, 0, metaState,
+                            VIRTUAL_KEYBOARD, 0, 0, SOURCE_KEYBOARD);
+                    boolean result = (Boolean) injectInputEventMethod.invoke(uiAutomation, event, true);
+                    if (result) {
+                        System.out.println(TAG + " KeyEvent " + keycode + ": OK (UiAutomation)");
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println(TAG + " UiAutomation KeyEvent failed: " + e.getMessage());
+            }
+        }
+
+        // 后备方案：使用 input keyevent 命令
+        return injectKeyViaShell(keycode);
+    }
+
+    /**
+     * 通过 Shell 注入按键 (降级方案)
+     */
+    private boolean injectKeyViaShell(int keycode) {
+        try {
+            Process process = Runtime.getRuntime().exec("input keyevent " + keycode);
+            int exitCode = process.waitFor();
+            boolean result = exitCode == 0;
+            System.out.println(TAG + " KeyEvent " + keycode + ": " + (result ? "OK" : "FAIL") + " (shell)");
+            return result;
+        } catch (Exception e) {
+            System.err.println(TAG + " Shell KeyEvent failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 按下指定按键
+     */
+    public boolean pressKey(int keycode) {
+        return injectKeyEvent(keycode, 2, 0);
+    }
+
+    // =========================================================================
+    // UI 感知
+    // =========================================================================
+
+    /**
+     * 获取根节点
+     *
+     * @return AccessibilityNodeInfo 对象，失败返回 null
+     */
+    public Object getRootNode() {
+        try {
+            return getRootInActiveWindowMethod.invoke(uiAutomation);
+        } catch (Exception e) {
+            System.err.println(TAG + " getRootNode failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 获取当前 Activity
+     *
+     * @return [packageName, activityName]
+     */
+    public String[] getCurrentActivity() {
+        String packageName = "";
+        String activityName = "";
+
+        // 方法1: 从 getRootNode 获取包名
+        try {
+            Object root = getRootNode();
+            if (root != null) {
+                Method getPackageName = root.getClass().getMethod("getPackageName");
+                Object pkgName = getPackageName.invoke(root);
+                if (pkgName != null) {
+                    packageName = pkgName.toString();
+                }
+            }
+        } catch (Exception e) {
+            System.err.println(TAG + " getPackageName failed: " + e.getMessage());
+        }
+
+        // 方法2: 从 dumpsys activity 获取完整信息
+        try {
+            Process process = Runtime.getRuntime().exec("dumpsys activity activities");
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // 查找 "mResumedActivity" 或 "topResumedActivity" 或 "mFocusedActivity"
+                if (line.contains("mResumedActivity") ||
+                    line.contains("topResumedActivity") ||
+                    line.contains("mFocusedActivity")) {
+
+                    System.out.println(TAG + " Activity line: " + line);
+
+                    // 格式: "mResumedActivity: ActivityRecord{xxx u0 com.example/.MainActivity t123}"
+                    int startIdx = line.indexOf("u0 ");
+                    if (startIdx < 0) startIdx = line.indexOf("u10 ");
+                    if (startIdx > 0) {
+                        startIdx += 3;
+                        int endIdx = line.indexOf(" ", startIdx);
+                        if (endIdx < 0) endIdx = line.indexOf("}", startIdx);
+                        if (endIdx > startIdx) {
+                            String fullName = line.substring(startIdx, endIdx).trim();
+                            int slashIdx = fullName.indexOf('/');
+                            if (slashIdx > 0) {
+                                packageName = fullName.substring(0, slashIdx);
+                                activityName = fullName.substring(slashIdx);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            reader.close();
+            process.waitFor();
+
+        } catch (Exception e) {
+            System.err.println(TAG + " getActivity failed: " + e.getMessage());
+        }
+
+        // 如果上面失败，尝试旧方法
+        if (activityName.isEmpty()) {
+            try {
+                Process process = Runtime.getRuntime().exec("dumpsys window windows");
+                BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(process.getInputStream()));
+
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.contains("mCurrentFocus") || line.contains("mFocusedApp")) {
+                        System.out.println(TAG + " Window line: " + line);
+                        int slashIdx = line.indexOf('/');
+                        int braceIdx = line.lastIndexOf('}');
+                        if (slashIdx > 0 && braceIdx > slashIdx) {
+                            // 尝试提取包名
+                            int spaceIdx = line.lastIndexOf(' ', slashIdx);
+                            if (spaceIdx > 0 && spaceIdx < slashIdx) {
+                                packageName = line.substring(spaceIdx + 1, slashIdx);
+                            }
+                            activityName = line.substring(slashIdx, braceIdx);
+                            break;
+                        }
+                    }
+                }
+                reader.close();
+                process.waitFor();
+
+            } catch (Exception e) {
+                System.err.println(TAG + " getActivity (fallback) failed: " + e.getMessage());
+            }
+        }
+
+        System.out.println(TAG + " getCurrentActivity: " + packageName + " / " + activityName);
+        return new String[]{packageName, activityName};
+    }
+
+    // =========================================================================
+    // 屏幕状态 (新增指令)
+    // =========================================================================
+
+    /**
+     * 获取屏幕状态
+     *
+     * @return 0=灭屏, 1=亮屏未锁定, 2=亮屏已锁定
+     */
+    public int getScreenState() {
+        try {
+            Process process = Runtime.getRuntime().exec("dumpsys power");
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+
+            boolean screenOn = false;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.contains("mWakefulness=") || line.contains("Display Power: state=")) {
+                    screenOn = line.contains("Awake") || line.contains("ON");
+                    break;
+                }
+            }
+            reader.close();
+
+            if (!screenOn) {
+                return 0;  // SCREEN_STATE_OFF
+            }
+
+            process = Runtime.getRuntime().exec("dumpsys window policy");
+            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+
+            boolean locked = false;
+            while ((line = reader.readLine()) != null) {
+                if (line.contains("mShowingLockscreen=true") ||
+                        line.contains("mDreamingLockscreen=true") ||
+                        line.contains("isKeyguardShowing=true")) {
+                    locked = true;
+                    break;
+                }
+            }
+            reader.close();
+
+            return locked ? 2 : 1;
+
+        } catch (Exception e) {
+            System.err.println(TAG + " getScreenState failed: " + e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * 获取屏幕尺寸 (实时获取)
+     *
+     * @return [width, height, density]
+     */
+    public int[] getScreenSize() {
+        // 如果缓存值为0，重新获取
+        if (screenWidth == 0 || screenHeight == 0) {
+            fetchScreenInfoRealtime();
+        }
+        return new int[]{screenWidth, screenHeight, screenDensity};
+    }
+
+    /**
+     * 实时获取屏幕信息
+     */
+    private void fetchScreenInfoRealtime() {
+        try {
+            // 获取尺寸
+            Process process = Runtime.getRuntime().exec(new String[]{"wm", "size"});
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                System.out.println(TAG + " wm size: " + line);
+                // 匹配 "Physical size: 1280x2772" 或 "Override size: ..."
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("(\\d+)x(\\d+)").matcher(line);
+                if (m.find()) {
+                    screenWidth = Integer.parseInt(m.group(1));
+                    screenHeight = Integer.parseInt(m.group(2));
+                }
+            }
+            reader.close();
+            process.waitFor();
+
+            // 获取密度
+            process = Runtime.getRuntime().exec(new String[]{"wm", "density"});
+            reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            while ((line = reader.readLine()) != null) {
+                System.out.println(TAG + " wm density: " + line);
+                java.util.regex.Matcher m = java.util.regex.Pattern
+                        .compile("(\\d+)").matcher(line);
+                if (m.find()) {
+                    screenDensity = Integer.parseInt(m.group(1));
+                }
+            }
+            reader.close();
+            process.waitFor();
+
+            System.out.println(TAG + " Screen: " + screenWidth + "x" + screenHeight + " @" + screenDensity + "dpi");
+
+        } catch (Exception e) {
+            System.err.println(TAG + " fetchScreenInfoRealtime failed: " + e.getMessage());
+            // 使用默认值
+            if (screenWidth == 0) screenWidth = 1080;
+            if (screenHeight == 0) screenHeight = 2400;
+            if (screenDensity == 0) screenDensity = 440;
+        }
+    }
+
+    // =========================================================================
+    // 应用控制 (新增指令)
+    // =========================================================================
+
+    /**
+     * 启动应用
+     *
+     * @param packageName 包名
+     * @param flags 启动标志 (bit0=清除任务, bit1=等待)
+     * @return 是否成功
+     */
+    public boolean launchApp(String packageName, int flags) {
+        try {
+            StringBuilder cmd = new StringBuilder();
+
+            String launchActivity = getLaunchActivity(packageName);
+            if (launchActivity == null || launchActivity.isEmpty()) {
+                cmd.append("monkey -p ").append(packageName)
+                        .append(" -c android.intent.category.LAUNCHER 1");
+            } else {
+                cmd.append("am start -n ").append(packageName).append("/").append(launchActivity);
+                if ((flags & 0x01) != 0) {
+                    cmd.append(" --activity-clear-task");
+                }
+            }
+
+            Process process = Runtime.getRuntime().exec(cmd.toString());
+
+            if ((flags & 0x02) != 0) {
+                process.waitFor();
+                Thread.sleep(500);
+            }
+
+            System.out.println(TAG + " launchApp: " + packageName);
+            return true;
+
+        } catch (Exception e) {
+            System.err.println(TAG + " launchApp failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private String getLaunchActivity(String packageName) {
+        try {
+            Process process = Runtime.getRuntime().exec(
+                    "cmd package resolve-activity --brief " + packageName);
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.contains("/")) {
+                    String[] parts = line.split("/");
+                    if (parts.length == 2) {
+                        return parts[1];
+                    }
+                }
+            }
+            reader.close();
+        } catch (Exception e) {
+            // Ignore
+        }
+        return null;
+    }
+
+    /**
+     * 强制停止应用
+     */
+    public boolean stopApp(String packageName) {
+        try {
+            Process process = Runtime.getRuntime().exec("am force-stop " + packageName);
+            int result = process.waitFor();
+            System.out.println(TAG + " stopApp: " + packageName);
+            return result == 0;
+        } catch (Exception e) {
+            System.err.println(TAG + " stopApp failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 滑动解锁
+     */
+    public boolean unlock() {
+        try {
+            pressKey(KEYCODE_WAKEUP);
+            Thread.sleep(200);
+
+            int centerX = screenWidth / 2;
+            int startY = (int) (screenHeight * 0.8);
+            int endY = (int) (screenHeight * 0.3);
+
+            boolean result = swipe(centerX, startY, centerX, endY, 300);
+            System.out.println(TAG + " unlock: " + (result ? "OK" : "FAIL"));
+            return result;
+
+        } catch (Exception e) {
+            System.err.println(TAG + " unlock failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    // =========================================================================
+    // 剪贴板操作
+    // =========================================================================
+
+    /**
+     * 设置剪贴板内容
+     */
+    public void setClipboard(String text) {
+        try {
+            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+            Method getService = serviceManager.getMethod("getService", String.class);
+            Object binder = getService.invoke(null, "clipboard");
+
+            Class<?> clipboardStub = Class.forName("android.content.IClipboard$Stub");
+            Class<?> ibinderClass = Class.forName("android.os.IBinder");
+            Method asInterface = clipboardStub.getMethod("asInterface", ibinderClass);
+            Object clipboard = asInterface.invoke(null, binder);
+
+            // 创建 ClipData
+            Class<?> clipDataClass = Class.forName("android.content.ClipData");
+            Method newPlainText = clipDataClass.getMethod("newPlainText",
+                    CharSequence.class, CharSequence.class);
+            Object clipData = newPlainText.invoke(null, "lxb", text);
+
+            // 尝试多种方法签名 (不同 Android 版本)
+            boolean success = false;
+            Method[] methods = clipboard.getClass().getMethods();
+            for (Method m : methods) {
+                if (!"setPrimaryClip".equals(m.getName())) continue;
+
+                Class<?>[] params = m.getParameterTypes();
+                try {
+                    if (params.length == 4) {
+                        // Android 10+: setPrimaryClip(ClipData, String, String, int)
+                        m.invoke(clipboard, clipData, "com.lxb.server", null, 0);
+                        success = true;
+                        break;
+                    } else if (params.length == 3) {
+                        // setPrimaryClip(ClipData, String, int)
+                        m.invoke(clipboard, clipData, "com.lxb.server", 0);
+                        success = true;
+                        break;
+                    } else if (params.length == 2) {
+                        // setPrimaryClip(ClipData, String)
+                        m.invoke(clipboard, clipData, "com.lxb.server");
+                        success = true;
+                        break;
+                    } else if (params.length == 1) {
+                        // setPrimaryClip(ClipData)
+                        m.invoke(clipboard, clipData);
+                        success = true;
+                        break;
+                    }
+                } catch (Exception ex) {
+                    // 尝试下一个签名
+                    continue;
+                }
+            }
+
+            if (success) {
+                System.out.println(TAG + " setClipboard: " + text.length() + " chars");
+            } else {
+                // 后备方案：使用 am broadcast
+                setClipboardViaShell(text);
+            }
+
+        } catch (Exception e) {
+            System.err.println(TAG + " setClipboard failed: " + e.getMessage());
+            // 后备方案
+            setClipboardViaShell(text);
+        }
+    }
+
+    /**
+     * 通过 shell 设置剪贴板 (后备方案)
+     * 返回 true 如果成功，false 需要使用 input text 直接输入
+     */
+    private boolean setClipboardViaShell(String text) {
+        // 这个方法实际上很难通过 shell 实现，因为需要 root 或特殊权限
+        // 返回 false 让调用者知道需要使用其他方式
+        System.err.println(TAG + " setClipboard via shell not supported, will use input text");
+        return false;
+    }
+
+    /**
+     * 直接使用 input text 输入文本 (最可靠的后备方案)
+     * @param text 要输入的文本
+     * @return 是否成功
+     */
+    public boolean inputTextDirect(String text) {
+        try {
+            // 对特殊字符进行转义
+            String escaped = text
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("'", "\\'")
+                .replace(" ", "%s")
+                .replace("&", "\\&")
+                .replace("<", "\\<")
+                .replace(">", "\\>")
+                .replace("|", "\\|")
+                .replace(";", "\\;")
+                .replace("(", "\\(")
+                .replace(")", "\\)")
+                .replace("$", "\\$")
+                .replace("`", "\\`");
+
+            Process process = Runtime.getRuntime().exec(new String[]{"input", "text", escaped});
+            int exitCode = process.waitFor();
+            boolean success = exitCode == 0;
+            System.out.println(TAG + " inputTextDirect: " + (success ? "OK" : "FAIL") + " (" + text.length() + " chars)");
+            return success;
+        } catch (Exception e) {
+            System.err.println(TAG + " inputTextDirect failed: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 执行粘贴 (Ctrl+V)
+     */
+    public void paste() {
+        // 优先尝试 UiAutomation 方式 (Ctrl+V)
+        if (injectKeyEvent(KEYCODE_V, 2, META_CTRL_ON)) {
+            return;
+        }
+
+        // 后备方案：使用 KEYCODE_PASTE (279)
+        try {
+            Process process = Runtime.getRuntime().exec("input keyevent 279");
+            int exitCode = process.waitFor();
+            if (exitCode == 0) {
+                System.out.println(TAG + " Paste: OK (KEYCODE_PASTE)");
+                return;
+            }
+        } catch (Exception e) {
+            System.err.println(TAG + " KEYCODE_PASTE failed: " + e.getMessage());
+        }
+
+        // 最后备方案：使用 input text 直接输入（需要从剪贴板获取）
+        System.err.println(TAG + " Paste failed - all methods exhausted");
+    }
+
+    /**
+     * 清空焦点输入框 (Ctrl+A + DEL)
+     */
+    public void clearFocusedText() {
+        // 尝试 Ctrl+A
+        if (!injectKeyEvent(KEYCODE_A, 2, META_CTRL_ON)) {
+            // 后备: 使用 KEYCODE_MOVE_HOME + KEYCODE_MOVE_END with shift
+            try {
+                Runtime.getRuntime().exec("input keyevent 123").waitFor(); // KEYCODE_MOVE_END
+                Thread.sleep(30);
+                Runtime.getRuntime().exec("input keyevent --longpress 123").waitFor(); // 全选
+            } catch (Exception ignored) {}
+        }
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException ignored) {}
+        pressKey(KEYCODE_DEL);
+    }
+
+    // =========================================================================
+    // 公开的 KeyCode 常量 (供外部使用)
+    // =========================================================================
+
+    public int getKeycodeBack() { return KEYCODE_BACK; }
+    public int getKeycodeHome() { return KEYCODE_HOME; }
+    public int getKeycodeEnter() { return KEYCODE_ENTER; }
+
+    // =========================================================================
+    // 截图
+    // =========================================================================
+
+    // JPEG 压缩质量 (1-100)，50 通常能把 400KB PNG 压缩到 30-60KB
+    private int screenshotQuality = 50;
+
+    /**
+     * 设置截图质量
+     * @param quality JPEG 质量 (1-100)
+     */
+    public void setScreenshotQuality(int quality) {
+        this.screenshotQuality = Math.max(1, Math.min(100, quality));
+    }
+
+    /**
+     * 截取屏幕截图
+     *
+     * @return JPEG 格式的截图数据，失败返回 null
+     */
+    public byte[] takeScreenshot() {
+        // 优先使用 UiAutomation
+        if (uiAutomation != null) {
+            try {
+                // 尝试通过 UiAutomation 获取截图
+                Method takeScreenshot = uiAutomation.getClass().getMethod("takeScreenshot");
+                Object bitmap = takeScreenshot.invoke(uiAutomation);
+
+                if (bitmap != null) {
+                    // 将 Bitmap 压缩为 JPEG
+                    byte[] jpegData = compressBitmapToJpeg(bitmap, screenshotQuality);
+                    if (jpegData != null) {
+                        System.out.println(TAG + " Screenshot: " + jpegData.length + " bytes (UiAutomation, JPEG q=" + screenshotQuality + ")");
+                        return jpegData;
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println(TAG + " UiAutomation screenshot failed: " + e.getMessage());
+            }
+        }
+
+        // 后备方案：使用 screencap 命令 + 转换为 JPEG
+        return takeScreenshotViaShell();
+    }
+
+    /**
+     * 将 Bitmap 压缩为 JPEG 格式
+     */
+    private byte[] compressBitmapToJpeg(Object bitmap, int quality) {
+        try {
+            Class<?> bitmapClass = Class.forName("android.graphics.Bitmap");
+            Class<?> formatClass = Class.forName("android.graphics.Bitmap$CompressFormat");
+            Object jpegFormat = formatClass.getField("JPEG").get(null);
+
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+
+            Method compress = bitmapClass.getMethod("compress",
+                    formatClass, int.class, java.io.OutputStream.class);
+            Boolean success = (Boolean) compress.invoke(bitmap, jpegFormat, quality, baos);
+
+            if (success) {
+                return baos.toByteArray();
+            }
+        } catch (Exception e) {
+            System.err.println(TAG + " Bitmap compress (JPEG) failed: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * 通过 shell 命令截图（后备方案）
+     * 截图到临时文件，然后通过 BitmapFactory 加载并转换为 JPEG
+     */
+    private byte[] takeScreenshotViaShell() {
+        String tmpPng = "/data/local/tmp/lxb_screenshot.png";
+
+        try {
+            // 截图到 PNG 文件
+            Process process = Runtime.getRuntime().exec("screencap -p " + tmpPng);
+            int exitCode = process.waitFor();
+
+            if (exitCode != 0) {
+                System.err.println(TAG + " screencap failed with exit code: " + exitCode);
+                return null;
+            }
+
+            // 使用 BitmapFactory.decodeFile 加载 PNG
+            Class<?> bitmapFactoryClass = Class.forName("android.graphics.BitmapFactory");
+            Method decodeFile = bitmapFactoryClass.getMethod("decodeFile", String.class);
+            Object bitmap = decodeFile.invoke(null, tmpPng);
+
+            if (bitmap != null) {
+                // 转换为 JPEG
+                byte[] jpegData = compressBitmapToJpeg(bitmap, screenshotQuality);
+
+                // 回收 Bitmap
+                try {
+                    Method recycle = bitmap.getClass().getMethod("recycle");
+                    recycle.invoke(bitmap);
+                } catch (Exception ignored) {}
+
+                // 删除临时文件
+                Runtime.getRuntime().exec("rm -f " + tmpPng);
+
+                if (jpegData != null) {
+                    System.out.println(TAG + " Screenshot: " + jpegData.length + " bytes (shell->JPEG q=" + screenshotQuality + ")");
+                    return jpegData;
+                }
+            }
+
+            // 如果转换失败，读取原始 PNG
+            System.err.println(TAG + " JPEG conversion failed, using raw PNG");
+            java.io.FileInputStream fis = new java.io.FileInputStream(tmpPng);
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int len;
+            while ((len = fis.read(buffer)) != -1) {
+                baos.write(buffer, 0, len);
+            }
+            fis.close();
+            Runtime.getRuntime().exec("rm -f " + tmpPng);
+
+            byte[] data = baos.toByteArray();
+            System.out.println(TAG + " Screenshot: " + data.length + " bytes (shell, PNG)");
+            return data;
+
+        } catch (Exception e) {
+            System.err.println(TAG + " Shell screenshot failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    // =========================================================================
+    // 关闭资源
+    // =========================================================================
+
+    public void close() {
+        if (uiAutomation != null) {
+            try {
+                Method disconnect = uiAutomation.getClass().getMethod("disconnect");
+                disconnect.invoke(uiAutomation);
+            } catch (Exception e) {
+                // Ignore
+            }
+            uiAutomation = null;
+        }
+        System.out.println(TAG + " Closed");
+    }
+}

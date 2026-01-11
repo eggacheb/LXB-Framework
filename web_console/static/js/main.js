@@ -41,14 +41,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // 定期检查连接状态
     setInterval(checkConnectionStatus, 5000);
 
-    addLog('info', '控制台已就绪，请连接设备');
+    addLog('info', '控制台已就绪，请输入 Android 设备 WiFi IP 并连接');
 });
 
 /**
  * 绑定所有命令按钮
  */
 function bindCommandButtons() {
-    // 使用事件委托，绑定所有带 data-cmd 的按钮
     document.querySelectorAll('[data-cmd]').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const cmd = e.target.getAttribute('data-cmd');
@@ -62,17 +61,25 @@ function bindCommandButtons() {
  */
 function handleCommand(cmd) {
     switch(cmd) {
+        // =============================================================
+        // Link Layer
+        // =============================================================
         case 'handshake':
             sendCommand('/api/command/handshake', {}, 'HANDSHAKE');
             break;
         case 'heartbeat':
             sendCommand('/api/command/heartbeat', {}, 'HEARTBEAT');
             break;
+
+        // =============================================================
+        // Input Layer
+        // =============================================================
         case 'tap':
             const x = parseInt(document.getElementById('tap-x').value);
             const y = parseInt(document.getElementById('tap-y').value);
             sendCommand('/api/command/tap', { x, y }, `TAP (${x}, ${y})`);
             break;
+
         case 'swipe':
             const x1 = parseInt(document.getElementById('swipe-x1').value);
             const y1 = parseInt(document.getElementById('swipe-y1').value);
@@ -80,8 +87,9 @@ function handleCommand(cmd) {
             const y2 = parseInt(document.getElementById('swipe-y2').value);
             const duration = parseInt(document.getElementById('swipe-duration').value);
             sendCommand('/api/command/swipe', { x1, y1, x2, y2, duration },
-                `SWIPE (${x1},${y1})→(${x2},${y2}) ${duration}ms`);
+                `SWIPE (${x1},${y1})->(${x2},${y2}) ${duration}ms`);
             break;
+
         case 'long_press':
             const lpx = parseInt(document.getElementById('longpress-x').value);
             const lpy = parseInt(document.getElementById('longpress-y').value);
@@ -89,12 +97,85 @@ function handleCommand(cmd) {
             sendCommand('/api/command/long_press', { x: lpx, y: lpy, duration: lpd },
                 `LONG_PRESS (${lpx}, ${lpy}) ${lpd}ms`);
             break;
+
+        case 'unlock':
+            sendCommand('/api/command/unlock', {}, 'UNLOCK');
+            break;
+
+        // =============================================================
+        // Input Extension
+        // =============================================================
         case 'input_text':
             const text = document.getElementById('input-text').value;
             sendCommand('/api/command/input_text', { text }, `INPUT_TEXT "${text}"`);
             break;
+
+        case 'key_home':
+            sendCommand('/api/command/key_event', { keycode: 'home' }, 'KEY_HOME');
+            break;
+        case 'key_back':
+            sendCommand('/api/command/key_event', { keycode: 'back' }, 'KEY_BACK');
+            break;
+        case 'key_enter':
+            sendCommand('/api/command/key_event', { keycode: 'enter' }, 'KEY_ENTER');
+            break;
+        case 'key_menu':
+            sendCommand('/api/command/key_event', { keycode: 'menu' }, 'KEY_MENU');
+            break;
+        case 'key_recent':
+            sendCommand('/api/command/key_event', { keycode: 'recent' }, 'KEY_RECENT');
+            break;
+
+        // =============================================================
+        // Sense Layer
+        // =============================================================
         case 'get_activity':
             sendCommand('/api/command/get_activity', {}, 'GET_ACTIVITY');
+            break;
+
+        case 'get_screen_state':
+            sendCommand('/api/command/get_screen_state', {}, 'GET_SCREEN_STATE');
+            break;
+
+        case 'get_screen_size':
+            sendCommand('/api/command/get_screen_size', {}, 'GET_SCREEN_SIZE');
+            break;
+
+        case 'find_node':
+            const query = document.getElementById('find-query').value;
+            if (!query) {
+                addLog('error', '请输入查找文本');
+                return;
+            }
+            sendCommand('/api/command/find_node', { query, multi_match: true }, `FIND_NODE "${query}"`);
+            break;
+
+        // =============================================================
+        // Lifecycle Layer
+        // =============================================================
+        case 'launch_app':
+            const launchPkg = document.getElementById('app-package').value;
+            if (!launchPkg) {
+                addLog('error', '请输入应用包名');
+                return;
+            }
+            sendCommand('/api/command/launch_app', { package: launchPkg }, `LAUNCH_APP ${launchPkg}`);
+            break;
+
+        case 'stop_app':
+            const stopPkg = document.getElementById('app-package').value;
+            if (!stopPkg) {
+                addLog('error', '请输入应用包名');
+                return;
+            }
+            sendCommand('/api/command/stop_app', { package: stopPkg }, `STOP_APP ${stopPkg}`);
+            break;
+
+        // =============================================================
+        // Media Layer
+        // =============================================================
+        case 'screenshot':
+            takeScreenshot();
             break;
     }
 }
@@ -168,7 +249,7 @@ async function sendCommand(endpoint, params, displayName) {
         return;
     }
 
-    addLog('command', `→ ${displayName}`);
+    addLog('command', `-> ${displayName}`);
     state.stats.sent++;
     updateStats();
 
@@ -183,27 +264,51 @@ async function sendCommand(endpoint, params, displayName) {
 
         if (result.success) {
             state.stats.success++;
-            addLog('response', `← ${result.message}`);
+            addLog('response', `<- ${result.message}`);
 
-            // 如果有响应数据，显示详细信息
+            // 显示详细响应
             if (result.response) {
-                if (result.response.package) {
-                    addLog('response', `  Package: ${result.response.package}`);
-                    addLog('response', `  Activity: ${result.response.activity}`);
-                } else if (result.response.length !== undefined) {
-                    addLog('response', `  响应长度: ${result.response.length} 字节`);
-                }
+                displayResponse(result.response);
             }
         } else {
             state.stats.failed++;
-            addLog('error', `✗ ${result.message}`);
+            addLog('error', `X ${result.message}`);
         }
     } catch (error) {
         state.stats.failed++;
-        addLog('error', `✗ 请求失败: ${error.message}`);
+        addLog('error', `X 请求失败: ${error.message}`);
     }
 
     updateStats();
+}
+
+/**
+ * 显示响应详情
+ */
+function displayResponse(response) {
+    if (response.package !== undefined) {
+        addLog('response', `   Package: ${response.package}`);
+        addLog('response', `   Activity: ${response.activity}`);
+    }
+    if (response.state_name !== undefined) {
+        addLog('response', `   State: ${response.state_name} (${response.state})`);
+    }
+    if (response.width !== undefined) {
+        addLog('response', `   Size: ${response.width}x${response.height} @${response.density}dpi`);
+    }
+    if (response.results !== undefined) {
+        addLog('response', `   Found: ${response.count} nodes`);
+        response.results.forEach((r, i) => {
+            if (Array.isArray(r) && r.length === 2) {
+                addLog('response', `   [${i}] (${r[0]}, ${r[1]})`);
+            } else if (Array.isArray(r) && r.length === 4) {
+                addLog('response', `   [${i}] bounds: (${r[0]},${r[1]})-(${r[2]},${r[3]})`);
+            }
+        });
+    }
+    if (response.length !== undefined && response.data === undefined) {
+        addLog('response', `   Response: ${response.length} bytes`);
+    }
 }
 
 /**
@@ -223,7 +328,7 @@ async function checkConnectionStatus() {
             }
         }
     } catch (error) {
-        // 静默失败，不影响用户体验
+        // 静默失败
     }
 }
 
@@ -237,7 +342,6 @@ function updateConnectionUI(connected) {
         connectBtn.disabled = true;
         disconnectBtn.disabled = false;
 
-        // 启用所有命令按钮
         document.querySelectorAll('.btn-cmd').forEach(btn => {
             btn.disabled = false;
         });
@@ -247,7 +351,6 @@ function updateConnectionUI(connected) {
         connectBtn.disabled = false;
         disconnectBtn.disabled = true;
 
-        // 禁用所有命令按钮
         document.querySelectorAll('.btn-cmd').forEach(btn => {
             btn.disabled = true;
         });
@@ -276,11 +379,9 @@ function addLog(type, message) {
     entry.appendChild(messageSpan);
 
     logContainer.appendChild(entry);
-
-    // 自动滚动到底部
     logContainer.scrollTop = logContainer.scrollHeight;
 
-    // 限制日志条目数量（最多 500 条）
+    // 限制日志条目数量
     while (logContainer.children.length > 500) {
         logContainer.removeChild(logContainer.firstChild);
     }
@@ -301,4 +402,68 @@ function updateStats() {
     statsSent.textContent = state.stats.sent;
     statsSuccess.textContent = state.stats.success;
     statsFailed.textContent = state.stats.failed;
+}
+
+/**
+ * 截图功能
+ */
+async function takeScreenshot() {
+    if (!state.connected) {
+        addLog('error', '未连接到设备');
+        return;
+    }
+
+    addLog('command', '-> SCREENSHOT');
+    state.stats.sent++;
+    updateStats();
+
+    try {
+        const response = await fetch('/api/command/screenshot', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            state.stats.success++;
+            addLog('response', `<- ${result.message}`);
+
+            // 显示截图预览
+            if (result.response && result.response.image) {
+                showScreenshotPreview(result.response.image, result.response.size);
+            }
+        } else {
+            state.stats.failed++;
+            addLog('error', `X ${result.message}`);
+        }
+    } catch (error) {
+        state.stats.failed++;
+        addLog('error', `X 请求失败: ${error.message}`);
+    }
+
+    updateStats();
+}
+
+/**
+ * 显示截图预览
+ */
+function showScreenshotPreview(base64Image, size) {
+    const preview = document.getElementById('screenshot-preview');
+    const image = document.getElementById('screenshot-image');
+    const closeBtn = document.getElementById('btn-close-preview');
+
+    // 设置图片源 (JPEG 格式)
+    image.src = 'data:image/jpeg;base64,' + base64Image;
+
+    // 显示预览区
+    preview.style.display = 'block';
+
+    // 绑定关闭按钮
+    closeBtn.onclick = function() {
+        preview.style.display = 'none';
+    };
+
+    addLog('info', `截图大小: ${(size / 1024).toFixed(1)} KB`);
 }

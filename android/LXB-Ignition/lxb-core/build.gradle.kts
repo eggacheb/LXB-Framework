@@ -7,48 +7,76 @@ java {
     targetCompatibility = JavaVersion.VERSION_1_8
 }
 
-// 配置 JAR 打包任务
-tasks.register<Jar>("buildServerJar") {
+// 配置默认 JAR 任务
+tasks.jar {
     archiveBaseName.set("lxb-core")
-    archiveVersion.set("1.0.0")
 
-    // ⭐ 确保先编译
-    dependsOn("classes")
-
-    // 指定 Main-Class
     manifest {
         attributes(
             "Main-Class" to "com.lxb.server.Main",
             "Manifest-Version" to "1.0"
         )
     }
+}
 
-    // ⭐ 明确指定从编译输出目录打包
-    from(layout.buildDirectory.dir("classes/java/main"))
+// 转换为 DEX 格式（Android 需要）
+tasks.register<Exec>("dex") {
+    dependsOn("jar")
 
-    // 设置输出目录
-    destinationDirectory.set(file("${project.rootDir}/app/src/main/assets"))
+    val jarFile = layout.buildDirectory.file("libs/lxb-core.jar")
+    val outputDir = layout.buildDirectory.dir("libs")
 
-    doFirst {
-        println("📂 Packing from: ${layout.buildDirectory.dir("classes/java/main").get()}")
+    // 查找 Android SDK build-tools 中的 d8
+    val androidHome = System.getenv("ANDROID_HOME")
+        ?: System.getenv("ANDROID_SDK_ROOT")
+        ?: "${System.getProperty("user.home")}/AppData/Local/Android/Sdk"
+
+    val buildToolsDir = file("$androidHome/build-tools")
+    val latestBuildTools = buildToolsDir.listFiles()
+        ?.filter { it.isDirectory }
+        ?.maxByOrNull { it.name }
+        ?.name ?: "34.0.0"
+
+    val d8Path = if (System.getProperty("os.name").lowercase().contains("win")) {
+        "$androidHome/build-tools/$latestBuildTools/d8.bat"
+    } else {
+        "$androidHome/build-tools/$latestBuildTools/d8"
     }
 
-    doLast {
-        println("✅ lxb-core.jar built successfully at: ${archiveFile.get()}")
-        println("📦 JAR size: ${archiveFile.get().asFile.length()} bytes")
+    doFirst {
+        println("🔧 Using d8 from: $d8Path")
+        println("📂 Input JAR: ${jarFile.get()}")
+    }
 
-        // 列出 JAR 内容以验证
-        println("📋 Classes in JAR:")
-        project.zipTree(archiveFile.get()).matching {
-            include("**/*.class")
-        }.files.forEach { file ->
-            println("   ${file.name}")
+    commandLine(
+        d8Path,
+        jarFile.get().asFile.absolutePath,
+        "--output", outputDir.get().asFile.absolutePath
+    )
+
+    doLast {
+        val dexFile = file("${outputDir.get()}/classes.dex")
+        if (dexFile.exists()) {
+            // 重新打包为包含 DEX 的 JAR
+            val dexJar = file("${outputDir.get()}/lxb-core-dex.jar")
+            ant.withGroovyBuilder {
+                "zip"("destfile" to dexJar) {
+                    "fileset"("dir" to outputDir.get().asFile) {
+                        "include"("name" to "classes.dex")
+                    }
+                }
+            }
+            println("✅ DEX JAR built: $dexJar")
+            println("📦 Size: ${dexJar.length()} bytes")
         }
     }
 }
 
-// 让 build 任务自动触发 JAR 打包
-tasks.named("build") {
-    finalizedBy("buildServerJar")
+// 完整构建任务
+tasks.register("buildDex") {
+    dependsOn("dex")
+    doLast {
+        println("🎉 Build complete! Use: adb push lxb-core/build/libs/lxb-core-dex.jar /data/local/tmp/")
+    }
 }
 

@@ -1,34 +1,154 @@
 package com.lxb.server.perception;
 
+import java.io.ByteArrayOutputStream;
+import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.regex.Pattern;
+import java.util.zip.Deflater;
+
+import com.lxb.server.network.UdpServer;
+import com.lxb.server.protocol.FrameCodec;
+import com.lxb.server.protocol.StringPoolConstants;
+import com.lxb.server.system.UiAutomationWrapper;
 
 /**
  * 感知引擎 - 负责 UI 树提取和节点查找
- * 注意: 当前版本暂不集成 UiAutomation，先实现协议解析逻辑
+ *
+ * 处理的命令:
+ * - 0x30 GET_ACTIVITY: 获取当前 Activity
+ * - 0x31 DUMP_HIERARCHY: 获取 UI 树
+ * - 0x32 FIND_NODE: 查找节点
+ * - 0x36 GET_SCREEN_STATE: 获取屏幕状态
+ * - 0x37 GET_SCREEN_SIZE: 获取屏幕尺寸
  */
 public class PerceptionEngine {
+
+    private static final String TAG = "[LXB][Perception]";
+
+    // 系统层依赖
+    private UiAutomationWrapper uiAutomation;
+
+    // 反射缓存
+    private Method getChildCountMethod;
+    private Method getChildMethod;
+    private Method getClassNameMethod;
+    private Method getTextMethod;
+    private Method getContentDescriptionMethod;
+    private Method getViewIdResourceNameMethod;
+    private Method getBoundsInScreenMethod;
+    private Method isClickableMethod;
+    private Method isVisibleToUserMethod;
+    private Method isEnabledMethod;
+    private Method isFocusedMethod;
+    private Method isScrollableMethod;
+    private Method isEditableMethod;
+    private Method isCheckableMethod;
+    private Method isCheckedMethod;
+    private Method recycleMethod;
+    private Class<?> rectClass;
+
+    // 查找类型常量
+    private static final int MATCH_EXACT_TEXT = 0;
+    private static final int MATCH_CONTAINS_TEXT = 1;
+    private static final int MATCH_REGEX = 2;
+    private static final int MATCH_RESOURCE_ID = 3;
+    private static final int MATCH_CLASS = 4;
+    private static final int MATCH_DESCRIPTION = 5;
+
+    // 返回模式常量
+    private static final int RETURN_COORDS = 0;
+    private static final int RETURN_BOUNDS = 1;
+    private static final int RETURN_FULL = 2;
+
+    /**
+     * 设置 UiAutomation 依赖
+     *
+     * @param wrapper UiAutomationWrapper 实例
+     */
+    public void setUiAutomation(UiAutomationWrapper wrapper) {
+        this.uiAutomation = wrapper;
+    }
 
     /**
      * 初始化感知引擎
      */
     public void initialize() {
-        System.out.println("[Perception] Engine initialized");
-        // TODO: 初始化 UiAutomation
-        // TODO: 初始化 StringPool
+        System.out.println(TAG + " Engine initialized");
+        if (uiAutomation == null) {
+            System.err.println(TAG + " WARNING: UiAutomation not set!");
+        }
+
+        // 初始化反射方法缓存
+        try {
+            initReflectionCache();
+        } catch (Exception e) {
+            System.err.println(TAG + " Failed to init reflection cache: " + e.getMessage());
+        }
     }
 
     /**
-     * 处理 GET_ACTIVITY 命令
-     * @return 响应数据 (success[1B] + pkg_len[2B] + pkg[UTF-8] + act_len[2B] + act[UTF-8])
+     * 初始化反射方法缓存
+     */
+    private void initReflectionCache() throws Exception {
+        Class<?> nodeClass = Class.forName("android.view.accessibility.AccessibilityNodeInfo");
+        rectClass = Class.forName("android.graphics.Rect");
+
+        getChildCountMethod = nodeClass.getMethod("getChildCount");
+        getChildMethod = nodeClass.getMethod("getChild", int.class);
+        getClassNameMethod = nodeClass.getMethod("getClassName");
+        getTextMethod = nodeClass.getMethod("getText");
+        getContentDescriptionMethod = nodeClass.getMethod("getContentDescription");
+        getViewIdResourceNameMethod = nodeClass.getMethod("getViewIdResourceName");
+        getBoundsInScreenMethod = nodeClass.getMethod("getBoundsInScreen", rectClass);
+        isClickableMethod = nodeClass.getMethod("isClickable");
+        isVisibleToUserMethod = nodeClass.getMethod("isVisibleToUser");
+        isEnabledMethod = nodeClass.getMethod("isEnabled");
+        isFocusedMethod = nodeClass.getMethod("isFocused");
+        isScrollableMethod = nodeClass.getMethod("isScrollable");
+        isCheckableMethod = nodeClass.getMethod("isCheckable");
+        isCheckedMethod = nodeClass.getMethod("isChecked");
+        recycleMethod = nodeClass.getMethod("recycle");
+
+        // isEditable 在 API 18+ 才有
+        try {
+            isEditableMethod = nodeClass.getMethod("isEditable");
+        } catch (NoSuchMethodException e) {
+            isEditableMethod = null;
+        }
+
+        System.out.println(TAG + " Reflection cache initialized");
+    }
+
+    /**
+     * 处理 GET_ACTIVITY 命令 (0x30)
+     *
+     * 响应格式: success[1B] + pkg_len[2B] + pkg[UTF-8] + act_len[2B] + act[UTF-8]
+     *
+     * @return 响应数据
      */
     public byte[] handleGetActivity() {
-        // TODO: 通过 UiAutomation 获取当前 Activity
-        String packageName = "com.example.demo";  // 模拟数据
-        String activityName = ".MainActivity";
+        System.out.println(TAG + " GET_ACTIVITY");
 
-        System.out.println("[Perception] GET_ACTIVITY: " + packageName + "/" + activityName);
+        String packageName = "";
+        String activityName = "";
+
+        if (uiAutomation != null) {
+            String[] result = uiAutomation.getCurrentActivity();
+            packageName = result[0];
+            activityName = result[1];
+        }
+
+        System.out.println(TAG + " Activity: " + packageName + "/" + activityName);
 
         ByteBuffer buffer = ByteBuffer.allocate(1024);
         buffer.order(ByteOrder.BIG_ENDIAN);
@@ -50,41 +170,812 @@ public class PerceptionEngine {
     }
 
     /**
-     * 处理 FIND_NODE 命令
+     * 处理 GET_SCREEN_STATE 命令 (0x36)
+     *
+     * 响应格式: status[1B] + state[1B]
+     *   state: 0=off, 1=on_unlocked, 2=on_locked
+     *
+     * @return 响应数据 (2 字节)
+     */
+    public byte[] handleGetScreenState() {
+        System.out.println(TAG + " GET_SCREEN_STATE");
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[]{0x00, 0x00};
+        }
+
+        int state = uiAutomation.getScreenState();
+        System.out.println(TAG + " Screen state: " + state);
+
+        return new byte[]{0x01, (byte) state};
+    }
+
+    /**
+     * 处理 GET_SCREEN_SIZE 命令 (0x37)
+     *
+     * 响应格式: status[1B] + width[2B] + height[2B] + density[2B]
+     *
+     * @return 响应数据 (7 字节)
+     */
+    public byte[] handleGetScreenSize() {
+        System.out.println(TAG + " GET_SCREEN_SIZE");
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[]{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        }
+
+        int[] size = uiAutomation.getScreenSize();
+        int width = size[0];
+        int height = size[1];
+        int density = size[2];
+
+        System.out.println(TAG + " Screen size: " + width + "x" + height + " @" + density + "dpi");
+
+        ByteBuffer buffer = ByteBuffer.allocate(7);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+        buffer.put((byte) 0x01);
+        buffer.putShort((short) width);
+        buffer.putShort((short) height);
+        buffer.putShort((short) density);
+
+        return buffer.array();
+    }
+
+    /**
+     * 处理 FIND_NODE 命令 (0x32)
+     *
+     * 请求格式:
+     *   match_type[1B] + return_mode[1B] + multi_match[1B] +
+     *   timeout_ms[2B] + query_len[2B] + query[UTF-8]
+     *
+     * 响应格式 (RETURN_COORDS):
+     *   status[1B] + count[1B] + coords[4B * count]
+     *
      * @param payload 请求负载
      * @return 响应数据
      */
     public byte[] handleFindNode(byte[] payload) {
-        // TODO: 解析查找条件
-        // TODO: 遍历 UI 树查找节点
-        // TODO: 返回节点坐标和索引
-        System.out.println("[Perception] FIND_NODE (not implemented)");
-        return new byte[]{0x00, 0x00};  // status=未找到, count=0
+        if (payload.length < 7) {
+            System.err.println(TAG + " FIND_NODE payload too short: " + payload.length);
+            return new byte[]{0x00, 0x00};
+        }
+
+        ByteBuffer buffer = ByteBuffer.wrap(payload);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+
+        int matchType = buffer.get() & 0xFF;
+        int returnMode = buffer.get() & 0xFF;
+        int multiMatch = buffer.get() & 0xFF;
+        int timeoutMs = buffer.getShort() & 0xFFFF;
+        int queryLen = buffer.getShort() & 0xFFFF;
+
+        if (payload.length < 7 + queryLen) {
+            System.err.println(TAG + " FIND_NODE query truncated");
+            return new byte[]{0x00, 0x00};
+        }
+
+        byte[] queryBytes = new byte[queryLen];
+        buffer.get(queryBytes);
+        String query = new String(queryBytes, StandardCharsets.UTF_8);
+
+        System.out.println(TAG + " FIND_NODE: query=\"" + query + "\" matchType=" + matchType +
+                " returnMode=" + returnMode + " multiMatch=" + (multiMatch != 0));
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[]{0x00, 0x00};
+        }
+
+        // 获取根节点
+        Object rootNode = uiAutomation.getRootNode();
+        if (rootNode == null) {
+            System.err.println(TAG + " Failed to get root node");
+            return new byte[]{0x00, 0x00};  // status=0 (not found)
+        }
+
+        // BFS 查找节点
+        List<int[]> results = new ArrayList<>();
+        Pattern regexPattern = (matchType == MATCH_REGEX) ? Pattern.compile(query) : null;
+
+        try {
+            findNodesBFS(rootNode, query, matchType, regexPattern, multiMatch != 0, results);
+        } catch (Exception e) {
+            System.err.println(TAG + " FIND_NODE error: " + e.getMessage());
+        }
+
+        System.out.println(TAG + " FIND_NODE found " + results.size() + " matches");
+
+        // 构建响应
+        if (results.isEmpty()) {
+            return new byte[]{0x00, 0x00};  // status=0, count=0
+        }
+
+        // 根据返回模式构建响应
+        if (returnMode == RETURN_COORDS) {
+            ByteBuffer respBuffer = ByteBuffer.allocate(2 + results.size() * 4);
+            respBuffer.order(ByteOrder.BIG_ENDIAN);
+            respBuffer.put((byte) 0x01);  // status=success
+            respBuffer.put((byte) results.size());
+
+            for (int[] bounds : results) {
+                // 计算中心点
+                int centerX = (bounds[0] + bounds[2]) / 2;
+                int centerY = (bounds[1] + bounds[3]) / 2;
+                respBuffer.putShort((short) centerX);
+                respBuffer.putShort((short) centerY);
+            }
+
+            return respBuffer.array();
+        } else if (returnMode == RETURN_BOUNDS) {
+            ByteBuffer respBuffer = ByteBuffer.allocate(2 + results.size() * 8);
+            respBuffer.order(ByteOrder.BIG_ENDIAN);
+            respBuffer.put((byte) 0x01);
+            respBuffer.put((byte) results.size());
+
+            for (int[] bounds : results) {
+                respBuffer.putShort((short) bounds[0]);  // left
+                respBuffer.putShort((short) bounds[1]);  // top
+                respBuffer.putShort((short) bounds[2]);  // right
+                respBuffer.putShort((short) bounds[3]);  // bottom
+            }
+
+            return respBuffer.array();
+        }
+
+        // RETURN_FULL - 暂不实现
+        return new byte[]{0x01, (byte) results.size()};
     }
 
     /**
-     * 处理 DUMP_HIERARCHY 命令
+     * BFS 遍历查找节点
+     */
+    private void findNodesBFS(Object root, String query, int matchType,
+                              Pattern regexPattern, boolean multiMatch,
+                              List<int[]> results) throws Exception {
+        if (getChildCountMethod == null) {
+            System.err.println(TAG + " Reflection cache not initialized");
+            return;
+        }
+
+        Queue<Object> queue = new LinkedList<>();
+        queue.offer(root);
+
+        while (!queue.isEmpty()) {
+            Object node = queue.poll();
+            if (node == null) continue;
+
+            // 检查当前节点是否匹配
+            if (matchesQuery(node, query, matchType, regexPattern)) {
+                int[] bounds = getNodeBounds(node);
+                if (bounds != null) {
+                    results.add(bounds);
+                    if (!multiMatch) {
+                        return;  // 只需要第一个匹配
+                    }
+                }
+            }
+
+            // 添加子节点到队列
+            int childCount = (Integer) getChildCountMethod.invoke(node);
+            for (int i = 0; i < childCount; i++) {
+                Object child = getChildMethod.invoke(node, i);
+                if (child != null) {
+                    queue.offer(child);
+                }
+            }
+        }
+    }
+
+    /**
+     * 检查节点是否匹配查询条件
+     */
+    private boolean matchesQuery(Object node, String query, int matchType,
+                                 Pattern regexPattern) throws Exception {
+        String target = null;
+
+        switch (matchType) {
+            case MATCH_EXACT_TEXT:
+            case MATCH_CONTAINS_TEXT:
+            case MATCH_REGEX:
+                CharSequence text = (CharSequence) getTextMethod.invoke(node);
+                target = text != null ? text.toString() : "";
+                break;
+
+            case MATCH_RESOURCE_ID:
+                target = (String) getViewIdResourceNameMethod.invoke(node);
+                if (target == null) target = "";
+                break;
+
+            case MATCH_CLASS:
+                CharSequence className = (CharSequence) getClassNameMethod.invoke(node);
+                target = className != null ? className.toString() : "";
+                break;
+
+            case MATCH_DESCRIPTION:
+                CharSequence desc = (CharSequence) getContentDescriptionMethod.invoke(node);
+                target = desc != null ? desc.toString() : "";
+                break;
+
+            default:
+                return false;
+        }
+
+        switch (matchType) {
+            case MATCH_EXACT_TEXT:
+                return query.equals(target);
+
+            case MATCH_CONTAINS_TEXT:
+                return target.contains(query);
+
+            case MATCH_REGEX:
+                return regexPattern != null && regexPattern.matcher(target).find();
+
+            case MATCH_RESOURCE_ID:
+            case MATCH_CLASS:
+            case MATCH_DESCRIPTION:
+                return target.contains(query);
+
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * 获取节点边界
+     */
+    private int[] getNodeBounds(Object node) throws Exception {
+        Object rect = rectClass.newInstance();
+        getBoundsInScreenMethod.invoke(node, rect);
+
+        int left = rectClass.getField("left").getInt(rect);
+        int top = rectClass.getField("top").getInt(rect);
+        int right = rectClass.getField("right").getInt(rect);
+        int bottom = rectClass.getField("bottom").getInt(rect);
+
+        return new int[]{left, top, right, bottom};
+    }
+
+    /**
+     * 处理 DUMP_HIERARCHY 命令 (0x31)
+     *
+     * 请求格式: format[1B] + compress[1B] + max_depth[2B]
+     *
+     * 响应格式 (Binary):
+     *   version[1B] + compress[1B] + original_size[4B] + compressed_size[4B] +
+     *   node_count[2B] + string_pool_size[2B] + [StringPool] + [Nodes]
+     *
      * @param payload 请求负载
      * @return 响应数据
      */
     public byte[] handleDumpHierarchy(byte[] payload) {
-        // TODO: 提取完整 UI 树
-        // TODO: 序列化为 15 字节固定格式
-        // TODO: StringPool 压缩
-        System.out.println("[Perception] DUMP_HIERARCHY (not implemented)");
-        return new byte[0];
+        if (payload.length < 4) {
+            System.err.println(TAG + " DUMP_HIERARCHY payload too short: " + payload.length);
+            return new byte[0];
+        }
+
+        ByteBuffer buffer = ByteBuffer.wrap(payload);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+
+        int format = buffer.get() & 0xFF;
+        int compress = buffer.get() & 0xFF;
+        int maxDepth = buffer.getShort() & 0xFFFF;
+
+        System.out.println(TAG + " DUMP_HIERARCHY format=" + format +
+                " compress=" + compress + " maxDepth=" + maxDepth);
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[0];
+        }
+
+        Object rootNode = uiAutomation.getRootNode();
+        if (rootNode == null) {
+            System.err.println(TAG + " Failed to get root node");
+            return new byte[0];
+        }
+
+        try {
+            // 收集所有节点
+            List<NodeInfo> nodes = new ArrayList<>();
+            DynamicStringPool pool = new DynamicStringPool();
+            collectNodes(rootNode, -1, 0, maxDepth, nodes, pool);
+
+            System.out.println(TAG + " Collected " + nodes.size() + " nodes");
+
+            // 序列化节点 (15 bytes each)
+            ByteArrayOutputStream nodeData = new ByteArrayOutputStream();
+            for (NodeInfo node : nodes) {
+                ByteBuffer nodeBuf = ByteBuffer.allocate(15);
+                nodeBuf.order(ByteOrder.BIG_ENDIAN);
+
+                nodeBuf.put((byte) (node.parentIndex == -1 ? 0xFF : node.parentIndex));
+                nodeBuf.put((byte) node.childCount);
+                nodeBuf.put((byte) node.flags);
+                nodeBuf.putShort((short) node.left);
+                nodeBuf.putShort((short) node.top);
+                nodeBuf.putShort((short) node.right);
+                nodeBuf.putShort((short) node.bottom);
+                nodeBuf.put((byte) node.classId);
+                nodeBuf.put((byte) node.textId);
+                nodeBuf.put((byte) node.resId);
+                nodeBuf.put((byte) node.descId);
+
+                nodeData.write(nodeBuf.array());
+            }
+
+            // 序列化动态字符串池
+            byte[] poolData = pool.serialize();
+
+            // 合并数据
+            byte[] uncompressedData = new byte[poolData.length + nodeData.size()];
+            System.arraycopy(poolData, 0, uncompressedData, 0, poolData.length);
+            System.arraycopy(nodeData.toByteArray(), 0, uncompressedData, poolData.length, nodeData.size());
+
+            int originalSize = uncompressedData.length;
+            byte[] outputData;
+            int compressFlag;
+
+            // 压缩 (如果请求)
+            if (compress == 1) {  // zlib
+                Deflater deflater = new Deflater(6);
+                deflater.setInput(uncompressedData);
+                deflater.finish();
+
+                ByteArrayOutputStream compressedStream = new ByteArrayOutputStream();
+                byte[] tempBuf = new byte[1024];
+                while (!deflater.finished()) {
+                    int len = deflater.deflate(tempBuf);
+                    compressedStream.write(tempBuf, 0, len);
+                }
+                deflater.end();
+
+                outputData = compressedStream.toByteArray();
+                compressFlag = 1;
+            } else {
+                outputData = uncompressedData;
+                compressFlag = 0;
+            }
+
+            // 构建响应头
+            ByteBuffer respBuffer = ByteBuffer.allocate(14 + outputData.length);
+            respBuffer.order(ByteOrder.BIG_ENDIAN);
+
+            respBuffer.put((byte) 0x01);  // version
+            respBuffer.put((byte) compressFlag);
+            respBuffer.putInt(originalSize);
+            respBuffer.putInt(outputData.length);
+            respBuffer.putShort((short) nodes.size());
+            respBuffer.putShort((short) pool.getDynamicCount());
+            respBuffer.put(outputData);
+
+            return respBuffer.array();
+
+        } catch (Exception e) {
+            System.err.println(TAG + " DUMP_HIERARCHY error: " + e.getMessage());
+            e.printStackTrace();
+            return new byte[0];
+        }
     }
 
     /**
-     * 处理 HIERARCHY_REQ 命令（分片传输）
+     * 递归收集节点
+     */
+    private void collectNodes(Object node, int parentIndex, int depth, int maxDepth,
+                              List<NodeInfo> nodes, DynamicStringPool pool) throws Exception {
+        if (node == null) return;
+        if (maxDepth > 0 && depth >= maxDepth) return;
+
+        int currentIndex = nodes.size();
+        NodeInfo info = new NodeInfo();
+        info.parentIndex = parentIndex;
+
+        // 获取属性
+        CharSequence className = (CharSequence) getClassNameMethod.invoke(node);
+        CharSequence text = (CharSequence) getTextMethod.invoke(node);
+        CharSequence desc = (CharSequence) getContentDescriptionMethod.invoke(node);
+        String resId = (String) getViewIdResourceNameMethod.invoke(node);
+
+        info.classId = pool.add(className != null ? className.toString() : "");
+        info.textId = pool.add(text != null ? text.toString() : "");
+        info.descId = pool.add(desc != null ? desc.toString() : "");
+        info.resId = pool.add(resId != null ? resId : "");
+
+        // 获取边界
+        int[] bounds = getNodeBounds(node);
+        info.left = bounds[0];
+        info.top = bounds[1];
+        info.right = bounds[2];
+        info.bottom = bounds[3];
+
+        // 获取标志
+        info.flags = 0;
+        if ((Boolean) isClickableMethod.invoke(node)) info.flags |= 0x01;
+        if ((Boolean) isVisibleToUserMethod.invoke(node)) info.flags |= 0x02;
+        if ((Boolean) isEnabledMethod.invoke(node)) info.flags |= 0x04;
+        if ((Boolean) isFocusedMethod.invoke(node)) info.flags |= 0x08;
+        if ((Boolean) isScrollableMethod.invoke(node)) info.flags |= 0x10;
+        if (isEditableMethod != null && (Boolean) isEditableMethod.invoke(node)) info.flags |= 0x20;
+        if ((Boolean) isCheckableMethod.invoke(node)) info.flags |= 0x40;
+        if ((Boolean) isCheckedMethod.invoke(node)) info.flags |= 0x80;
+
+        // 获取子节点数量
+        int childCount = (Integer) getChildCountMethod.invoke(node);
+        info.childCount = Math.min(childCount, 255);
+
+        nodes.add(info);
+
+        // 递归处理子节点
+        for (int i = 0; i < childCount; i++) {
+            Object child = getChildMethod.invoke(node, i);
+            if (child != null) {
+                collectNodes(child, currentIndex, depth + 1, maxDepth, nodes, pool);
+            }
+        }
+    }
+
+    /**
+     * 节点信息结构
+     */
+    private static class NodeInfo {
+        int parentIndex;
+        int childCount;
+        int flags;
+        int left, top, right, bottom;
+        int classId, textId, resId, descId;
+    }
+
+    /**
+     * 动态字符串池
+     */
+    private static class DynamicStringPool {
+        private final Map<String, Integer> pool = new HashMap<>();
+        private final List<String> dynamicStrings = new ArrayList<>();
+
+        /**
+         * 添加字符串并返回 ID
+         */
+        public int add(String s) {
+            if (s == null || s.isEmpty()) {
+                return StringPoolConstants.NULL_MARKER;
+            }
+
+            // 检查预定义类
+            for (int i = 0; i < StringPoolConstants.PREDEFINED_CLASSES.length; i++) {
+                if (s.equals(StringPoolConstants.PREDEFINED_CLASSES[i])) {
+                    return i;
+                }
+            }
+
+            // 检查预定义文本
+            for (int i = 0; i < StringPoolConstants.PREDEFINED_TEXTS.length; i++) {
+                if (s.equals(StringPoolConstants.PREDEFINED_TEXTS[i])) {
+                    return 0x40 + i;
+                }
+            }
+
+            // 检查动态池
+            if (pool.containsKey(s)) {
+                return pool.get(s);
+            }
+
+            // 添加到动态池
+            int id = StringPoolConstants.DYNAMIC_POOL_START + dynamicStrings.size();
+            if (id > 0xFE) {
+                // 池满，返回空标记
+                return StringPoolConstants.NULL_MARKER;
+            }
+
+            pool.put(s, id);
+            dynamicStrings.add(s);
+            return id;
+        }
+
+        public int getDynamicCount() {
+            return dynamicStrings.size();
+        }
+
+        /**
+         * 序列化动态字符串池
+         *
+         * 格式: count[2B] + entries[...]
+         *   Entry: str_id[1B] + str_len[1B] + str_data[UTF-8]
+         */
+        public byte[] serialize() {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+            // 写入数量 (2 bytes, big endian)
+            out.write((dynamicStrings.size() >> 8) & 0xFF);
+            out.write(dynamicStrings.size() & 0xFF);
+
+            // 写入每个动态字符串
+            for (int i = 0; i < dynamicStrings.size(); i++) {
+                String s = dynamicStrings.get(i);
+                byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+                int id = StringPoolConstants.DYNAMIC_POOL_START + i;
+
+                out.write(id & 0xFF);
+                out.write(Math.min(bytes.length, 255));
+                out.write(bytes, 0, Math.min(bytes.length, 255));
+            }
+
+            return out.toByteArray();
+        }
+    }
+
+    /**
+     * 处理 HIERARCHY_REQ 命令（分片传输）- 预留接口
+     *
      * @param payload 请求负载
      * @return 响应数据
      */
     public byte[] handleHierarchyReq(byte[] payload) {
-        // TODO: 提取 UI 树
-        // TODO: 分片处理
-        // TODO: 返回 META 元数据
-        System.out.println("[Perception] HIERARCHY_REQ (not implemented)");
-        return new byte[0];
+        // 分片传输 - 暂不实现，先使用 DUMP_HIERARCHY 单帧传输
+        System.out.println(TAG + " HIERARCHY_REQ (delegating to DUMP_HIERARCHY)");
+        return handleDumpHierarchy(payload);
+    }
+
+    /**
+     * 处理 SCREENSHOT 命令 (0x60)
+     *
+     * 响应格式: status[1B] + image_data[N]
+     *   status: 0x01=成功, 0x00=失败
+     *   image_data: PNG 格式的图片数据
+     *
+     * @return 响应数据
+     */
+    public byte[] handleScreenshot() {
+        System.out.println(TAG + " SCREENSHOT");
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[]{0x00};
+        }
+
+        byte[] imageData = uiAutomation.takeScreenshot();
+        if (imageData == null || imageData.length == 0) {
+            System.err.println(TAG + " Screenshot failed");
+            return new byte[]{0x00};
+        }
+
+        System.out.println(TAG + " Screenshot: " + imageData.length + " bytes");
+
+        // 构建响应: status[1B] + image_data[N]
+        byte[] response = new byte[1 + imageData.length];
+        response[0] = 0x01;  // success
+        System.arraycopy(imageData, 0, response, 1, imageData.length);
+
+        return response;
+    }
+
+    // =========================================================================
+    // 分片截图传输 (CMD_IMG_REQ = 0x61)
+    // =========================================================================
+
+    // 分片大小 (1KB chunks, 保证单个 UDP 包 < 1500 MTU)
+    private static final int CHUNK_SIZE = 1024;
+
+    // 命令常量
+    private static final int CMD_IMG_META = 0x62;
+    private static final int CMD_IMG_CHUNK = 0x63;
+    private static final int CMD_IMG_MISSING = 0x64;
+    private static final int CMD_IMG_FIN = 0x65;
+    private static final int CMD_ACK = 0x02;
+
+    /**
+     * 处理分片截图请求 (CMD_IMG_REQ = 0x61)
+     *
+     * 流程:
+     * 1. 截图并切分为 1KB 块
+     * 2. 发送 IMG_META (img_id, total_size, num_chunks)
+     * 3. 等待客户端 ACK
+     * 4. 突发发送所有 IMG_CHUNK
+     * 5. 等待 IMG_MISSING 或 IMG_FIN
+     * 6. 如果收到 IMG_MISSING，重传缺失块
+     * 7. 如果收到 IMG_FIN，发送 ACK 并结束
+     *
+     * @param server UDP 服务器实例
+     * @param clientAddr 客户端地址
+     * @param clientPort 客户端端口
+     * @param reqSeq 请求序列号
+     * @return true 如果传输成功
+     */
+    public boolean handleFragmentedScreenshot(
+            UdpServer server,
+            InetAddress clientAddr,
+            int clientPort,
+            int reqSeq
+    ) {
+        System.out.println(TAG + " IMG_REQ: Starting fragmented screenshot transfer");
+
+        // Step 1: 截图
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return false;
+        }
+
+        byte[] imageData = uiAutomation.takeScreenshot();
+        if (imageData == null || imageData.length == 0) {
+            System.err.println(TAG + " Screenshot failed");
+            return false;
+        }
+
+        System.out.println(TAG + " Screenshot: " + imageData.length + " bytes (" +
+                (imageData.length / 1024.0) + " KB)");
+
+        // Step 2: 切分为 chunks
+        int numChunks = (imageData.length + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        byte[][] chunks = new byte[numChunks][];
+
+        for (int i = 0; i < numChunks; i++) {
+            int offset = i * CHUNK_SIZE;
+            int len = Math.min(CHUNK_SIZE, imageData.length - offset);
+            chunks[i] = new byte[len];
+            System.arraycopy(imageData, offset, chunks[i], 0, len);
+        }
+
+        System.out.println(TAG + " Split into " + numChunks + " chunks");
+
+        try {
+            // Step 3: 发送 IMG_META
+            int imgId = (int) (System.currentTimeMillis() & 0xFFFFFFFF);
+            byte[] metaPayload = packImgMeta(imgId, imageData.length, numChunks);
+            byte[] metaFrame = FrameCodec.encode(reqSeq, (byte) CMD_IMG_META, metaPayload);
+            server.send(clientAddr, clientPort, metaFrame);
+            System.out.println(TAG + " Sent IMG_META: imgId=" + imgId +
+                    ", size=" + imageData.length + ", chunks=" + numChunks);
+
+            // Step 4: 等待 META ACK (超时 2 秒)
+            if (!waitForAck(server, reqSeq, 2000)) {
+                System.err.println(TAG + " Timeout waiting for META ACK");
+                return false;
+            }
+            System.out.println(TAG + " Received ACK for IMG_META");
+
+            // Step 5: 突发发送所有 chunks
+            int chunkSeq = reqSeq + 1;
+            for (int i = 0; i < numChunks; i++) {
+                byte[] chunkPayload = packImgChunk(i, chunks[i]);
+                byte[] chunkFrame = FrameCodec.encode(chunkSeq + i, (byte) CMD_IMG_CHUNK, chunkPayload);
+                server.send(clientAddr, clientPort, chunkFrame);
+
+                // 每 10 个 chunk 打印进度
+                if ((i + 1) % 10 == 0 || i == numChunks - 1) {
+                    System.out.println(TAG + " Sent chunk " + (i + 1) + "/" + numChunks);
+                }
+
+                // 短暂延迟避免网络拥塞
+                if (i % 5 == 0) {
+                    Thread.sleep(1);
+                }
+            }
+
+            // Step 6: 等待 IMG_MISSING 或 IMG_FIN (最多重试 3 次)
+            int maxRetries = 3;
+            for (int retry = 0; retry < maxRetries; retry++) {
+                UdpServer.ReceivedFrame frame = waitForFrame(server, 1000);
+                if (frame == null) {
+                    System.out.println(TAG + " Timeout waiting for client response, retry " + (retry + 1));
+                    continue;
+                }
+
+                FrameCodec.DecodedFrame decoded = FrameCodec.decode(frame.data);
+                int cmd = decoded.cmd & 0xFF;
+
+                if (cmd == CMD_IMG_FIN) {
+                    // 传输完成，发送 ACK
+                    byte[] ackFrame = FrameCodec.encode(decoded.seq, (byte) CMD_ACK, new byte[0]);
+                    server.send(clientAddr, clientPort, ackFrame);
+                    System.out.println(TAG + " Received IMG_FIN, sent ACK. Transfer complete!");
+                    return true;
+                } else if (cmd == CMD_IMG_MISSING) {
+                    // 解析缺失块列表并重传
+                    List<Integer> missingIndices = unpackImgMissing(decoded.payload);
+                    System.out.println(TAG + " Received IMG_MISSING: " + missingIndices.size() + " chunks");
+
+                    for (int idx : missingIndices) {
+                        if (idx >= 0 && idx < numChunks) {
+                            byte[] chunkPayload = packImgChunk(idx, chunks[idx]);
+                            byte[] chunkFrame = FrameCodec.encode(chunkSeq + idx, (byte) CMD_IMG_CHUNK, chunkPayload);
+                            server.send(clientAddr, clientPort, chunkFrame);
+                        }
+                    }
+                    System.out.println(TAG + " Resent " + missingIndices.size() + " missing chunks");
+                } else {
+                    System.out.println(TAG + " Unexpected command: 0x" + String.format("%02X", cmd));
+                }
+            }
+
+            System.err.println(TAG + " Max retries exceeded");
+            return false;
+
+        } catch (Exception e) {
+            System.err.println(TAG + " Fragmented transfer error: " + e.getMessage());
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * 打包 IMG_META 负载
+     * 格式: img_id[uint32] + total_size[uint32] + num_chunks[uint16]
+     */
+    private byte[] packImgMeta(int imgId, int totalSize, int numChunks) {
+        ByteBuffer buf = ByteBuffer.allocate(10);
+        buf.order(ByteOrder.BIG_ENDIAN);
+        buf.putInt(imgId);
+        buf.putInt(totalSize);
+        buf.putShort((short) numChunks);
+        return buf.array();
+    }
+
+    /**
+     * 打包 IMG_CHUNK 负载
+     * 格式: chunk_index[uint16] + chunk_data
+     */
+    private byte[] packImgChunk(int chunkIndex, byte[] chunkData) {
+        ByteBuffer buf = ByteBuffer.allocate(2 + chunkData.length);
+        buf.order(ByteOrder.BIG_ENDIAN);
+        buf.putShort((short) chunkIndex);
+        buf.put(chunkData);
+        return buf.array();
+    }
+
+    /**
+     * 解包 IMG_MISSING 负载
+     * 格式: count[uint16] + indices[uint16 array]
+     */
+    private List<Integer> unpackImgMissing(byte[] payload) {
+        List<Integer> indices = new ArrayList<>();
+        if (payload.length < 2) return indices;
+
+        ByteBuffer buf = ByteBuffer.wrap(payload);
+        buf.order(ByteOrder.BIG_ENDIAN);
+
+        int count = buf.getShort() & 0xFFFF;
+        for (int i = 0; i < count && buf.remaining() >= 2; i++) {
+            indices.add(buf.getShort() & 0xFFFF);
+        }
+        return indices;
+    }
+
+    /**
+     * 等待指定序列号的 ACK
+     */
+    private boolean waitForAck(UdpServer server, int expectedSeq, int timeout) {
+        long deadline = System.currentTimeMillis() + timeout;
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                UdpServer.ReceivedFrame frame = server.receive(
+                        (int) (deadline - System.currentTimeMillis())
+                );
+
+                FrameCodec.DecodedFrame decoded = FrameCodec.decode(frame.data);
+                if ((decoded.cmd & 0xFF) == CMD_ACK && decoded.seq == expectedSeq) {
+                    return true;
+                }
+            } catch (SocketTimeoutException e) {
+                break;
+            } catch (Exception e) {
+                System.err.println(TAG + " Error waiting for ACK: " + e.getMessage());
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 等待帧（带超时）
+     */
+    private UdpServer.ReceivedFrame waitForFrame(UdpServer server, int timeout) {
+        try {
+            return server.receive(timeout);
+        } catch (SocketTimeoutException e) {
+            return null;
+        } catch (Exception e) {
+            System.err.println(TAG + " Error receiving frame: " + e.getMessage());
+            return null;
+        }
     }
 }

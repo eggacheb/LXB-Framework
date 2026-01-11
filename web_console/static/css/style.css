@@ -228,6 +228,27 @@ body {
     font-size: 12px;
 }
 
+.btn-danger {
+    background: #dc3545;
+    color: white;
+}
+
+.btn-danger:hover {
+    background: #c82333;
+}
+
+.key-row {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.key-row .btn-cmd {
+    width: auto;
+    flex: 1;
+    min-width: 60px;
+}
+
 /* 日志面板 */
 .log-panel {
     display: flex;
@@ -356,4 +377,42 @@ body {
 
 .log-container::-webkit-scrollbar-thumb:hover {
     background: #5a5a5a;
+}
+
+/* 高亮按钮 */
+.btn-highlight {
+    background: #17a2b8;
+    color: white;
+}
+
+.btn-highlight:hover {
+    background: #138496;
+}
+
+/* 截图预览区 */
+.screenshot-preview {
+    padding: 15px;
+    background: #2d2d2d;
+    border-top: 2px solid #3e3e3e;
+}
+
+.screenshot-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.screenshot-header h3 {
+    color: #ffffff;
+    font-size: 1em;
+}
+
+.screenshot-preview img {
+    max-width: 100%;
+    max-height: 400px;
+    border-radius: 4px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    display: block;
+    margin: 0 auto;
 }

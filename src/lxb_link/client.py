@@ -272,6 +272,42 @@ class LXBLinkClient:
         logger.info(f"SWIPE successful")
         return response
 
+    def long_press(self, x: int, y: int, duration: int = 1000) -> bytes:
+        """
+        Perform a long press gesture at specified coordinates.
+
+        Args:
+            x: X coordinate (0 to 65535)
+            y: Y coordinate (0 to 65535)
+            duration: Press duration in milliseconds (default: 1000)
+
+        Returns:
+            Response payload from device
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+            ValueError: If coordinates are out of range
+        """
+        if not (0 <= x <= 65535):
+            raise ValueError(f"X coordinate {x} out of range [0, 65535]")
+        if not (0 <= y <= 65535):
+            raise ValueError(f"Y coordinate {y} out of range [0, 65535]")
+        if not (0 <= duration <= 65535):
+            raise ValueError(f"Duration {duration} out of range [0, 65535]")
+
+        self._ensure_connected()
+
+        logger.info(f"Sending LONG_PRESS command: ({x}, {y}), duration={duration}ms")
+
+        import struct
+        payload = struct.pack('>HHH', x, y, duration)
+
+        response = self._transport.send_reliable(0x12, payload)  # CMD_LONG_PRESS = 0x12
+
+        logger.info(f"LONG_PRESS successful: ({x}, {y})")
+        return response
+
     def screenshot(self) -> bytes:
         """
         Capture a screenshot from the device (legacy single-frame mode).
@@ -379,12 +415,8 @@ class LXBLinkClient:
 
         logger.info("Sending GET_ACTIVITY command")
 
-        # Pack using ProtocolFrame
-        frame = ProtocolFrame.pack_get_activity(self._transport._seq) # type: ignore
-        self._transport._seq += 1 # type: ignore
-
-        # Send and wait for response
-        response = self._transport.send_reliable(CMD_GET_ACTIVITY, b'') # type: ignore
+        # 使用 send_reliable 发送
+        response = self._transport.send_reliable(CMD_GET_ACTIVITY, b'')
 
         # Unpack response
         success, package_name, activity_name = ProtocolFrame.unpack_get_activity_response(response)
@@ -454,30 +486,29 @@ class LXBLinkClient:
         logger.info(f"Sending FIND_NODE command: query='{query}', "
                     f"match_type={match_type}, return_mode={return_mode}")
 
-        # Pack using ProtocolFrame
-        frame = ProtocolFrame.pack_find_node(
-            self._transport._seq, # type: ignore
+        # 构建 payload: match_type[1B] + return_mode[1B] + flags[1B] + timeout[2B] + query_len[2B] + query
+        import struct
+        flags = 0x01 if multi_match else 0x00
+
+        query_bytes = query.encode('utf-8')
+        payload = struct.pack('>BBBHH',
             match_type,
             return_mode,
-            query,
-            multi_match,
-            timeout_ms
-        )
-        self._transport._seq += 1 # type: ignore
+            flags,
+            timeout_ms,
+            len(query_bytes)
+        ) + query_bytes
 
-        # Send frame and wait for response
-        self._transport._sock.sendto(frame, (self.host, self.port)) # type: ignore
-        response_frame = self._transport._wait_for_ack(self._transport._seq - 1, self.timeout) # type: ignore
+        # 使用 send_reliable 发送
+        response = self._transport.send_reliable(CMD_FIND_NODE, payload)
 
-        # Unpack response based on return_mode
-        _, _, payload = ProtocolFrame.unpack(response_frame)
-
+        # 解析响应
         if return_mode == RETURN_COORDS:
-            status, results = ProtocolFrame.unpack_find_node_coords(payload)
+            status, results = ProtocolFrame.unpack_find_node_coords(response)
             logger.info(f"FIND_NODE successful: status={status}, found {len(results)} nodes")
             return status, results
         elif return_mode == RETURN_BOUNDS:
-            status, results = ProtocolFrame.unpack_find_node_bounds(payload)
+            status, results = ProtocolFrame.unpack_find_node_bounds(response)
             logger.info(f"FIND_NODE successful: status={status}, found {len(results)} nodes")
             return status, results
         else:
@@ -550,26 +581,20 @@ class LXBLinkClient:
 
         logger.info(f"Sending DUMP_HIERARCHY command: format={format}, compress={compress}")
 
-        # Pack using ProtocolFrame
-        frame = ProtocolFrame.pack_dump_hierarchy(
-            self._transport._seq, # type: ignore
-            format,
-            compress,
-            max_depth
-        )
-        self._transport._seq += 1 # type: ignore
+        # 构建 payload: format[1B] + compress[1B] + max_depth[1B]
+        import struct
+        payload = struct.pack('>BBB', format, compress, max_depth)
 
-        # Send frame
-        self._transport._sock.sendto(frame, (self.host, self.port)) # type: ignore
-
-        # Wait for response (may be large, handled by fragmentation if needed)
-        response_frame = self._transport._wait_for_ack(self._transport._seq - 1, self.timeout * 3) # type: ignore
-
-        # Unpack response
-        _, _, payload = ProtocolFrame.unpack(response_frame)
+        # 使用 send_reliable 发送 (使用更长的超时)
+        original_timeout = self._transport.timeout
+        self._transport.timeout = self.timeout * 3
+        try:
+            response = self._transport.send_reliable(CMD_DUMP_HIERARCHY, payload)
+        finally:
+            self._transport.timeout = original_timeout
 
         if format == HIERARCHY_FORMAT_BINARY:
-            hierarchy, pool = ProtocolFrame.unpack_dump_hierarchy_binary(payload)
+            hierarchy, pool = ProtocolFrame.unpack_dump_hierarchy_binary(response)
             logger.info(f"DUMP_HIERARCHY successful: {hierarchy['node_count']} nodes, "
                         f"string pool has {len(pool.pool)} dynamic entries")
             return hierarchy
@@ -633,27 +658,36 @@ class LXBLinkClient:
 
         logger.info(f"Sending INPUT_TEXT command: text='{text[:20]}...', method={method}")
 
-        # Pack using ProtocolFrame
-        frame = ProtocolFrame.pack_input_text(
-            self._transport._seq, # type: ignore
-            text,
+        # 构建 payload: method[1B] + flags[1B] + target_x[2B] + target_y[2B] + delay[2B] + text_len[2B] + text
+        import struct
+        flags = 0
+        if clear_first:
+            flags |= 0x01
+        if press_enter:
+            flags |= 0x02
+        if hide_keyboard:
+            flags |= 0x04
+
+        text_bytes = text.encode('utf-8')
+        payload = struct.pack('>BBHHHH',
             method,
-            clear_first,
-            press_enter,
-            hide_keyboard,
+            flags,
             target_x,
             target_y,
-            delay_ms
-        )
-        self._transport._seq += 1 # type: ignore
+            delay_ms,
+            len(text_bytes)
+        ) + text_bytes
 
-        # Send frame and wait for response
-        self._transport._sock.sendto(frame, (self.host, self.port)) # type: ignore
-        response_frame = self._transport._wait_for_ack(self._transport._seq - 1, self.timeout) # type: ignore
+        # 使用 send_reliable 发送
+        response = self._transport.send_reliable(CMD_INPUT_TEXT, payload)
 
-        # Unpack response
-        _, _, payload = ProtocolFrame.unpack(response_frame)
-        status, actual_method = ProtocolFrame.unpack_input_text_response(payload)
+        # 解析响应: status[1B] + actual_method[1B]
+        if len(response) >= 2:
+            status = response[0]
+            actual_method = response[1]
+        else:
+            status = 0
+            actual_method = method
 
         logger.info(f"INPUT_TEXT successful: status={status}, actual_method={actual_method}")
         return status, actual_method
@@ -702,21 +736,150 @@ class LXBLinkClient:
 
         logger.info(f"Sending KEY_EVENT command: keycode={keycode}, action={action}")
 
-        # Pack using ProtocolFrame
-        frame = ProtocolFrame.pack_key_event(
-            self._transport._seq, # type: ignore
-            keycode,
-            action,
-            meta_state
-        )
-        self._transport._seq += 1 # type: ignore
+        # 简化格式: keycode[1B] + action[1B]
+        import struct
+        payload = struct.pack('>BB', keycode & 0xFF, action & 0xFF)
 
-        # Send and wait for response
-        response = self._transport.send_reliable(CMD_KEY_EVENT, frame[14:-4]) # type: ignore
-        # Note: send_reliable expects just payload, strip header+CRC
+        response = self._transport.send_reliable(CMD_KEY_EVENT, payload)
 
         logger.info(f"KEY_EVENT successful: keycode={keycode}")
         return response
+
+    # =========================================================================
+    # New Commands - Screen & Lifecycle APIs ⭐
+    # =========================================================================
+
+    def unlock(self) -> bool:
+        """
+        Unlock the device screen.
+
+        Returns:
+            True if unlock successful, False otherwise
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+        """
+        self._ensure_connected()
+
+        logger.info("Sending UNLOCK command")
+        response = self._transport.send_reliable(0x1B, b'')  # CMD_UNLOCK = 0x1B
+
+        success = len(response) > 0 and response[0] == 0x01
+        logger.info(f"UNLOCK {'successful' if success else 'failed'}")
+        return success
+
+    def get_screen_state(self) -> tuple[bool, int]:
+        """
+        Get current screen state.
+
+        Returns:
+            Tuple of (success, state)
+            - state: 0=off, 1=on_unlocked, 2=on_locked
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+        """
+        self._ensure_connected()
+
+        logger.info("Sending GET_SCREEN_STATE command")
+        response = self._transport.send_reliable(0x36, b'')  # CMD_GET_SCREEN_STATE = 0x36
+
+        if len(response) >= 2:
+            success = response[0] == 0x01
+            state = response[1]
+            logger.info(f"GET_SCREEN_STATE: state={state}")
+            return success, state
+        return False, 0
+
+    def get_screen_size(self) -> tuple[bool, int, int, int]:
+        """
+        Get device screen size and density.
+
+        Returns:
+            Tuple of (success, width, height, density)
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+        """
+        self._ensure_connected()
+
+        logger.info("Sending GET_SCREEN_SIZE command")
+        response = self._transport.send_reliable(0x37, b'')  # CMD_GET_SCREEN_SIZE = 0x37
+
+        if len(response) >= 7:
+            import struct
+            success = response[0] == 0x01
+            width, height, density = struct.unpack('>HHH', response[1:7])
+            logger.info(f"GET_SCREEN_SIZE: {width}x{height} @{density}dpi")
+            return success, width, height, density
+        return False, 0, 0, 0
+
+    def launch_app(self, package_name: str, clear_task: bool = False, wait: bool = False) -> bool:
+        """
+        Launch an application by package name.
+
+        Args:
+            package_name: Package name (e.g., "com.tencent.mm")
+            clear_task: Clear task stack before launch
+            wait: Wait for activity to start
+
+        Returns:
+            True if launch successful, False otherwise
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+        """
+        self._ensure_connected()
+
+        logger.info(f"Sending LAUNCH_APP command: {package_name}")
+
+        import struct
+        flags = 0
+        if clear_task:
+            flags |= 0x01
+        if wait:
+            flags |= 0x02
+
+        pkg_bytes = package_name.encode('utf-8')
+        payload = struct.pack('>BH', flags, len(pkg_bytes)) + pkg_bytes
+
+        response = self._transport.send_reliable(0x43, payload)  # CMD_LAUNCH_APP = 0x43
+
+        success = len(response) > 0 and response[0] == 0x01
+        logger.info(f"LAUNCH_APP {'successful' if success else 'failed'}")
+        return success
+
+    def stop_app(self, package_name: str) -> bool:
+        """
+        Stop an application by package name.
+
+        Args:
+            package_name: Package name (e.g., "com.tencent.mm")
+
+        Returns:
+            True if stop successful, False otherwise
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+        """
+        self._ensure_connected()
+
+        logger.info(f"Sending STOP_APP command: {package_name}")
+
+        import struct
+        pkg_bytes = package_name.encode('utf-8')
+        payload = struct.pack('>H', len(pkg_bytes)) + pkg_bytes
+
+        response = self._transport.send_reliable(0x44, payload)  # CMD_STOP_APP = 0x44
+
+        success = len(response) > 0 and response[0] == 0x01
+        logger.info(f"STOP_APP {'successful' if success else 'failed'}")
+        return success
 
     # =========================================================================
     # Context Manager & Utilities

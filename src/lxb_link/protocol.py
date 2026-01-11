@@ -1177,3 +1177,141 @@ class ProtocolFrame:
 
         return header + compressed_data
 
+    # =========================================================================
+    # New Commands - Screen & App Control ⭐
+    # =========================================================================
+
+    @staticmethod
+    def pack_unlock(seq: int) -> bytes:
+        """
+        Pack UNLOCK command (no payload).
+
+        Args:
+            seq: Sequence number
+
+        Returns:
+            Complete binary frame for UNLOCK command
+        """
+        from .constants import CMD_UNLOCK
+        return ProtocolFrame.pack(seq, CMD_UNLOCK, b'')
+
+    @staticmethod
+    def pack_get_screen_state(seq: int) -> bytes:
+        """
+        Pack GET_SCREEN_STATE command (no payload).
+
+        Args:
+            seq: Sequence number
+
+        Returns:
+            Complete binary frame for GET_SCREEN_STATE command
+        """
+        from .constants import CMD_GET_SCREEN_STATE
+        return ProtocolFrame.pack(seq, CMD_GET_SCREEN_STATE, b'')
+
+    @staticmethod
+    def unpack_screen_state_response(payload: bytes) -> Tuple[int, int]:
+        """
+        Unpack GET_SCREEN_STATE response payload.
+
+        Args:
+            payload: GET_SCREEN_STATE response payload
+
+        Returns:
+            Tuple of (status, state)
+            state: 0=off, 1=on_unlocked, 2=on_locked
+        """
+        if len(payload) != 2:
+            raise LXBProtocolError(
+                f"Invalid GET_SCREEN_STATE response size: {len(payload)} (expected 2)",
+                ERR_INVALID_PAYLOAD_SIZE
+            )
+        status, state = struct.unpack('>BB', payload)
+        return status, state
+
+    @staticmethod
+    def pack_get_screen_size(seq: int) -> bytes:
+        """
+        Pack GET_SCREEN_SIZE command (no payload).
+
+        Args:
+            seq: Sequence number
+
+        Returns:
+            Complete binary frame for GET_SCREEN_SIZE command
+        """
+        from .constants import CMD_GET_SCREEN_SIZE
+        return ProtocolFrame.pack(seq, CMD_GET_SCREEN_SIZE, b'')
+
+    @staticmethod
+    def unpack_screen_size_response(payload: bytes) -> Tuple[int, int, int, int]:
+        """
+        Unpack GET_SCREEN_SIZE response payload.
+
+        Args:
+            payload: GET_SCREEN_SIZE response payload
+
+        Returns:
+            Tuple of (status, width, height, density)
+        """
+        if len(payload) != 7:
+            raise LXBProtocolError(
+                f"Invalid GET_SCREEN_SIZE response size: {len(payload)} (expected 7)",
+                ERR_INVALID_PAYLOAD_SIZE
+            )
+        status, width, height, density = struct.unpack('>BHHH', payload)
+        return status, width, height, density
+
+    @staticmethod
+    def pack_launch_app(seq: int, package_name: str, clear_task: bool = False,
+                       wait: bool = False) -> bytes:
+        """
+        Pack LAUNCH_APP command.
+
+        Args:
+            seq: Sequence number
+            package_name: Package name to launch (e.g., "com.tencent.mm")
+            clear_task: Clear task stack before launch
+            wait: Wait for Activity to fully launch
+
+        Returns:
+            Complete binary frame for LAUNCH_APP command
+        """
+        from .constants import CMD_LAUNCH_APP, LAUNCH_FLAG_CLEAR_TASK, LAUNCH_FLAG_WAIT
+
+        package_bytes = package_name.encode('utf-8')
+
+        # Build flags
+        flags = 0
+        if clear_task:
+            flags |= LAUNCH_FLAG_CLEAR_TASK
+        if wait:
+            flags |= LAUNCH_FLAG_WAIT
+
+        # Pack: flags[1B] + package_len[2B] + package_name[UTF-8]
+        payload = struct.pack('>BH', flags, len(package_bytes)) + package_bytes
+
+        return ProtocolFrame.pack(seq, CMD_LAUNCH_APP, payload)
+
+    @staticmethod
+    def pack_stop_app(seq: int, package_name: str) -> bytes:
+        """
+        Pack STOP_APP command.
+
+        Args:
+            seq: Sequence number
+            package_name: Package name to stop (e.g., "com.tencent.mm")
+
+        Returns:
+            Complete binary frame for STOP_APP command
+        """
+        from .constants import CMD_STOP_APP
+
+        package_bytes = package_name.encode('utf-8')
+
+        # Pack: package_len[2B] + package_name[UTF-8]
+        payload = struct.pack('>H', len(package_bytes)) + package_bytes
+
+        return ProtocolFrame.pack(seq, CMD_STOP_APP, payload)
+
+

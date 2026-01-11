@@ -3,16 +3,24 @@ LXB Web Console - Flask Backend
 用于可视化调试 LXB-Link 协议的 Web 控制台
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
 import sys
 import os
+import base64
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.lxb_link.client import LXBLinkClient
-from src.lxb_link.constants import *
+from src.lxb_link.constants import (
+    CMD_HEARTBEAT,
+    KEY_HOME,
+    KEY_BACK,
+    KEY_ENTER,
+    KEY_MENU,
+    KEY_RECENT,
+)
 
 app = Flask(__name__)
 CORS(app)  # 允许跨域请求
@@ -38,7 +46,7 @@ def connect():
     global client, connection_info
 
     data = request.json
-    host = data.get('host', '127.0.0.1')
+    host = data.get('host', '192.168.1.100')  # 默认 WiFi 地址
     port = data.get('port', 12345)
 
     try:
@@ -104,6 +112,10 @@ def status():
     return jsonify(connection_info)
 
 
+# =============================================================================
+# Link Layer (0x00-0x0F)
+# =============================================================================
+
 @app.route('/api/command/handshake', methods=['POST'])
 def cmd_handshake():
     """发送握手命令"""
@@ -122,6 +134,30 @@ def cmd_handshake():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
+
+@app.route('/api/command/heartbeat', methods=['POST'])
+def cmd_heartbeat():
+    """发送 HEARTBEAT 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    try:
+        response = client._transport.send_reliable(CMD_HEARTBEAT, b'')
+        return jsonify({
+            'success': True,
+            'message': '心跳成功',
+            'response': {
+                'length': len(response),
+                'data': list(response) if response else []
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =============================================================================
+# Input Layer (0x10-0x1F)
+# =============================================================================
 
 @app.route('/api/command/tap', methods=['POST'])
 def cmd_tap():
@@ -174,44 +210,6 @@ def cmd_swipe():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-@app.route('/api/command/get_activity', methods=['POST'])
-def cmd_get_activity():
-    """发送 GET_ACTIVITY 命令"""
-    if not client:
-        return jsonify({'success': False, 'message': '未连接'}), 400
-
-    try:
-        response = client.get_activity()
-        return jsonify({
-            'success': True,
-            'message': '获取 Activity 成功',
-            'response': response
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
-@app.route('/api/command/heartbeat', methods=['POST'])
-def cmd_heartbeat():
-    """发送 HEARTBEAT 命令"""
-    if not client:
-        return jsonify({'success': False, 'message': '未连接'}), 400
-
-    try:
-        # 直接使用 transport 发送心跳
-        response = client._transport.send_reliable(CMD_HEARTBEAT, b'')
-        return jsonify({
-            'success': True,
-            'message': '心跳成功',
-            'response': {
-                'length': len(response),
-                'data': list(response) if response else []
-            }
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
 @app.route('/api/command/long_press', methods=['POST'])
 def cmd_long_press():
     """发送 LONG_PRESS 命令"""
@@ -237,6 +235,26 @@ def cmd_long_press():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/api/command/unlock', methods=['POST'])
+def cmd_unlock():
+    """发送 UNLOCK 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    try:
+        success = client.unlock()
+        return jsonify({
+            'success': success,
+            'message': '解锁成功' if success else '解锁失败'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =============================================================================
+# Input Extension (0x20-0x2F)
+# =============================================================================
+
 @app.route('/api/command/input_text', methods=['POST'])
 def cmd_input_text():
     """发送 INPUT_TEXT 命令"""
@@ -245,19 +263,257 @@ def cmd_input_text():
 
     data = request.json
     text = data.get('text', 'Hello LXB')
+    clear_first = data.get('clear_first', False)
+    press_enter = data.get('press_enter', False)
 
     try:
-        response = client.input_text(text)
+        status, actual_method = client.input_text(
+            text,
+            clear_first=clear_first,
+            press_enter=press_enter
+        )
         return jsonify({
-            'success': True,
-            'message': f'输入文本 "{text}" 成功',
+            'success': status == 1,
+            'message': f'输入文本 "{text}" 成功' if status == 1 else '输入文本失败',
             'response': {
-                'length': len(response),
-                'data': list(response) if response else []
+                'status': status,
+                'method': actual_method
             }
         })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/key_event', methods=['POST'])
+def cmd_key_event():
+    """发送 KEY_EVENT 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    data = request.json
+    keycode = data.get('keycode', KEY_BACK)
+    action = data.get('action', 2)  # 2 = CLICK
+
+    # 支持按名称指定按键
+    key_map = {
+        'home': KEY_HOME,
+        'back': KEY_BACK,
+        'enter': KEY_ENTER,
+        'menu': KEY_MENU,
+        'recent': KEY_RECENT
+    }
+    if isinstance(keycode, str):
+        keycode = key_map.get(keycode.lower(), KEY_BACK)
+
+    try:
+        response = client.key_event(keycode, action)
+        return jsonify({
+            'success': True,
+            'message': f'KEY_EVENT keycode={keycode} 成功',
+            'response': {
+                'length': len(response) if response else 0
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =============================================================================
+# Sense Layer (0x30-0x3F)
+# =============================================================================
+
+@app.route('/api/command/get_activity', methods=['POST'])
+def cmd_get_activity():
+    """发送 GET_ACTIVITY 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    try:
+        success, package_name, activity_name = client.get_activity()
+        return jsonify({
+            'success': success,
+            'message': '获取 Activity 成功' if success else '获取 Activity 失败',
+            'response': {
+                'package': package_name,
+                'activity': activity_name
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/get_screen_state', methods=['POST'])
+def cmd_get_screen_state():
+    """发送 GET_SCREEN_STATE 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    try:
+        success, state = client.get_screen_state()
+        state_names = {0: '关闭', 1: '亮屏已解锁', 2: '亮屏已锁定'}
+        return jsonify({
+            'success': success,
+            'message': f'屏幕状态: {state_names.get(state, "未知")}',
+            'response': {
+                'state': state,
+                'state_name': state_names.get(state, 'unknown')
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/get_screen_size', methods=['POST'])
+def cmd_get_screen_size():
+    """发送 GET_SCREEN_SIZE 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    try:
+        success, width, height, density = client.get_screen_size()
+        return jsonify({
+            'success': success,
+            'message': f'屏幕尺寸: {width}x{height} @{density}dpi',
+            'response': {
+                'width': width,
+                'height': height,
+                'density': density
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/find_node', methods=['POST'])
+def cmd_find_node():
+    """发送 FIND_NODE 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    data = request.json
+    query = data.get('query', '')
+    match_type = data.get('match_type', 1)  # MATCH_CONTAINS_TEXT
+    multi_match = data.get('multi_match', False)
+
+    try:
+        status, results = client.find_node(
+            query,
+            match_type=match_type,
+            multi_match=multi_match
+        )
+        return jsonify({
+            'success': status == 1,
+            'message': f'找到 {len(results)} 个节点' if status == 1 else '未找到节点',
+            'response': {
+                'status': status,
+                'count': len(results),
+                'results': results
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =============================================================================
+# Lifecycle Layer (0x40-0x4F)
+# =============================================================================
+
+@app.route('/api/command/launch_app', methods=['POST'])
+def cmd_launch_app():
+    """发送 LAUNCH_APP 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    data = request.json
+    package_name = data.get('package', '')
+    clear_task = data.get('clear_task', False)
+
+    if not package_name:
+        return jsonify({'success': False, 'message': '请输入包名'}), 400
+
+    try:
+        success = client.launch_app(package_name, clear_task=clear_task)
+        return jsonify({
+            'success': success,
+            'message': f'启动 {package_name} 成功' if success else f'启动 {package_name} 失败'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/stop_app', methods=['POST'])
+def cmd_stop_app():
+    """发送 STOP_APP 命令"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    data = request.json
+    package_name = data.get('package', '')
+
+    if not package_name:
+        return jsonify({'success': False, 'message': '请输入包名'}), 400
+
+    try:
+        success = client.stop_app(package_name)
+        return jsonify({
+            'success': success,
+            'message': f'停止 {package_name} 成功' if success else f'停止 {package_name} 失败'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =============================================================================
+# Media Layer (0x60-0x6F)
+# =============================================================================
+
+@app.route('/api/command/screenshot', methods=['POST'])
+def cmd_screenshot():
+    """发送 SCREENSHOT 命令 (使用分片传输)"""
+    if not client:
+        return jsonify({'success': False, 'message': '未连接'}), 400
+
+    try:
+        # 使用分片传输方式获取截图
+        image_data = client.request_screenshot()
+
+        if image_data and len(image_data) > 0:
+            # 截图成功，返回 base64 编码的图片
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            return jsonify({
+                'success': True,
+                'message': f'截图成功: {len(image_data)} 字节 ({len(image_data)/1024:.1f} KB)',
+                'response': {
+                    'size': len(image_data),
+                    'image': image_base64
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': '截图失败: 无数据返回'
+            })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/screenshot/raw', methods=['GET'])
+def cmd_screenshot_raw():
+    """获取原始截图图片（可直接嵌入 img 标签）"""
+    if not client:
+        return Response('未连接', status=400, mimetype='text/plain')
+
+    try:
+        # 使用分片传输方式获取截图
+        image_data = client.request_screenshot()
+
+        if image_data and len(image_data) > 0:
+            # 返回 JPEG 图片 (服务端已压缩为 JPEG)
+            return Response(image_data, mimetype='image/jpeg')
+        else:
+            return Response('截图失败', status=500, mimetype='text/plain')
+    except Exception as e:
+        return Response(str(e), status=500, mimetype='text/plain')
 
 
 if __name__ == '__main__':
