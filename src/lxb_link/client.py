@@ -40,6 +40,8 @@ from .constants import (
     # Input Extension commands
     CMD_INPUT_TEXT,
     CMD_KEY_EVENT,
+    # Lifecycle commands
+    CMD_LIST_APPS,
     # Match types for FIND_NODE
     MATCH_EXACT_TEXT,
     MATCH_CONTAINS_TEXT,
@@ -1067,6 +1069,57 @@ class LXBLinkClient:
         success = len(response) > 0 and response[0] == 0x01
         logger.info(f"STOP_APP {'successful' if success else 'failed'}")
         return success
+
+    def list_apps(self, filter: str = "all") -> list[str]:
+        """
+        List installed applications on the device.
+
+        Args:
+            filter: Application filter type
+                - "all": All applications (default)
+                - "user": User-installed applications only
+                - "system": System applications only
+
+        Returns:
+            List of package names (e.g., ["com.tencent.mm", "com.baidu.tieba", ...])
+
+        Raises:
+            LXBTimeoutError: If command times out
+            RuntimeError: If client is not connected
+
+        Example:
+            >>> # List all user-installed apps
+            >>> apps = client.list_apps("user")
+            >>> for pkg in apps:
+            ...     print(pkg)
+        """
+        self._ensure_connected()
+
+        logger.info(f"Sending LIST_APPS command: filter={filter}")
+
+        # Map filter string to filter code
+        filter_map = {"all": 0, "user": 1, "system": 2}
+        filter_code = filter_map.get(filter.lower(), 0)
+
+        import struct
+        import json
+        payload = struct.pack('>B', filter_code)
+
+        response = self._transport.send_reliable(CMD_LIST_APPS, payload)
+
+        # Parse response: status[1B] + json_len[2B] + json_data
+        if len(response) >= 3:
+            status = response[0]
+            json_len = struct.unpack('>H', response[1:3])[0]
+
+            if status == 0x01 and len(response) >= 3 + json_len:
+                json_data = response[3:3 + json_len].decode('utf-8')
+                apps = json.loads(json_data)
+                logger.info(f"LIST_APPS successful: {len(apps)} apps found")
+                return apps
+
+        logger.warning("LIST_APPS failed or returned empty")
+        return []
 
     # =========================================================================
     # Context Manager & Utilities

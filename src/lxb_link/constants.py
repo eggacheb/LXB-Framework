@@ -114,7 +114,8 @@ CMD_STOP_APP = 0x44        # Force stop application ⭐
 CMD_CLEAR_DATA = 0x45      # Clear app data (new)
 CMD_INSTALL_APK = 0x46     # Install application (new)
 CMD_UNINSTALL = 0x47       # Uninstall application (new)
-# 0x48-0x4F: Reserved
+CMD_LIST_APPS = 0x48       # List installed applications ⭐
+# 0x49-0x4F: Reserved
 
 # -----------------------------------------------------------------------------
 # Debug Layer (0x50-0x5F) - Debugging Tools

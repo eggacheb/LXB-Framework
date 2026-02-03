@@ -987,6 +987,61 @@ public class UiAutomationWrapper {
     }
 
     /**
+     * 获取已安装应用列表
+     *
+     * @param filter 过滤器: 0=all, 1=user, 2=system
+     * @return 应用列表，格式为 JSON 数组字符串
+     */
+    public String listApps(int filter) {
+        StringBuilder result = new StringBuilder();
+        result.append("[");
+        boolean first = true;
+
+        try {
+            // 使用 pm list packages 命令获取应用列表
+            String cmd;
+            switch (filter) {
+                case 1:  // user apps only
+                    cmd = "pm list packages -3";
+                    break;
+                case 2:  // system apps only
+                    cmd = "pm list packages -s";
+                    break;
+                default:  // all apps
+                    cmd = "pm list packages";
+                    break;
+            }
+
+            Process process = Runtime.getRuntime().exec(cmd);
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // 格式: "package:com.example.app"
+                if (line.startsWith("package:")) {
+                    String packageName = line.substring(8);
+                    if (!first) {
+                        result.append(",");
+                    }
+                    first = false;
+                    result.append("\"").append(packageName).append("\"");
+                }
+            }
+            reader.close();
+            process.waitFor();
+
+            System.out.println(TAG + " listApps: filter=" + filter);
+
+        } catch (Exception e) {
+            System.err.println(TAG + " listApps failed: " + e.getMessage());
+        }
+
+        result.append("]");
+        return result.toString();
+    }
+
+    /**
      * 滑动解锁
      */
     public boolean unlock() {

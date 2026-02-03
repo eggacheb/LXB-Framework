@@ -40,6 +40,33 @@ body {
     font-size: 1.1em;
 }
 
+/* 导航链接 */
+.nav-links {
+    margin-top: 15px;
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+}
+
+.nav-links a {
+    color: rgba(255, 255, 255, 0.8);
+    text-decoration: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    transition: all 0.3s;
+    font-weight: 500;
+}
+
+.nav-links a:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: white;
+}
+
+.nav-links a.active {
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+}
+
 /* 连接面板 */
 .connection-panel {
     padding: 20px 30px;
@@ -808,4 +835,88 @@ body {
     color: #6a6a8a;
     padding: 20px;
     font-style: italic;
+}
+
+/* 应用列表样式 */
+.apps-list {
+    padding: 16px;
+}
+
+.app-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    margin: 4px 0;
+    background: #22223a;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.app-item:hover {
+    background: #2a2a4a;
+}
+
+.app-index {
+    width: 32px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(102, 126, 234, 0.2);
+    color: #667eea;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.app-package {
+    flex: 1;
+    color: #81c784;
+    font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.app-package:hover {
+    color: #a5d6a7;
+    text-decoration: underline;
+}
+
+.app-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.btn-tiny {
+    padding: 4px 10px;
+    font-size: 11px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.btn-tiny.btn-primary {
+    background: #667eea;
+    color: white;
+}
+
+.btn-tiny.btn-primary:hover {
+    background: #7986cb;
+}
+
+.btn-tiny.btn-danger {
+    background: #ef5350;
+    color: white;
+}
+
+.btn-tiny.btn-danger:hover {
+    background: #e57373;
 }

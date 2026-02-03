@@ -145,6 +145,9 @@ public class CommandDispatcher {
                 case 0x44:  // CMD_STOP_APP ⭐ NEW
                     response = executionEngine.handleStopApp(payload);
                     break;
+                case 0x48:  // CMD_LIST_APPS ⭐ NEW
+                    response = executionEngine.handleListApps(payload);
+                    break;
 
                 // =================================================================
                 // Media Layer (0x60-0x6F)

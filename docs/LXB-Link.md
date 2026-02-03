@@ -8,7 +8,7 @@
 | **协议版本** | 1.0 (Binary First Architecture)      |
 | **作者**     | WuWei                                |
 | **创建日期** | 2025-01-01                           |
-| **最后更新** | 2026-01-12                           |
+| **最后更新** | 2026-01-14                           |
 | **状态**     | 正式发布 (Production Ready)          |
 | **适用范围** | Android 设备控制、AI Agent 感知      |
 
@@ -498,10 +498,35 @@ ACTION_SCROLLABLE  = 0x04  // bit 2: 可滚动
 ACTION_TEXT_ONLY   = 0x08  // bit 3: 仅文本 (非交互)
 ```
 
-**文本关联规则**:
-- 如果节点自身有 text，直接使用
-- 如果交互节点没有 text，递归查找第一个有文本的子节点
-- 如果仍为空，使用 content-desc
+**文本关联规则 (边界包含法)**:
+
+DUMP_ACTIONS 使用**边界包含法**为没有文本的交互节点关联子节点文本：
+
+1. 如果节点自身有 `text`，直接使用
+2. 如果交互节点没有 `text`，使用边界包含法收集子节点文本：
+   - 获取容器节点边界 `bounds = [left, top, right, bottom]`
+   - 递归遍历所有后代节点
+   - 收集边界完全包含在容器内的节点的 `text` 或 `contentDescription`
+   - 去重后用空格连接
+3. 如果仍为空，使用 `content-desc`
+
+边界包含判定条件：
+```
+child.left >= container.left   AND
+child.top >= container.top     AND
+child.right <= container.right AND
+child.bottom <= container.bottom
+```
+
+示例：
+```
+Button bounds: [100, 200, 400, 280]
+  ├── ImageView bounds: [110, 210, 160, 270]  → 包含 ✓ (无文本)
+  ├── TextView bounds: [170, 220, 300, 260] text="确定"  → 收集
+  └── TextView bounds: [310, 220, 390, 260] text="取消"  → 收集
+
+结果: Button.text = "确定 取消"
+```
 
 **示例**:
 ```python

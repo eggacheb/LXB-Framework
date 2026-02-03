@@ -201,3 +201,20 @@ config.local.py
 
 # Compiled Java classes (IDE incremental build)
 /android/LXB-Ignition/*/bin/
+
+# =============================================================================
+# Auto Map Builder
+# =============================================================================
+
+# 探索结果输出目录
+maps/
+maps_output/
+exploration_results/
+
+# VLM 模型缓存
+.vlm_cache/
+vlm_cache/
+
+# 截图缓存
+.screenshots/
+screenshots_cache/

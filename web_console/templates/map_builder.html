@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LXB Map Builder v2</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f1a;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1a1a3e 0%, #0f0f1a 100%);
+            padding: 15px 30px;
+            border-bottom: 1px solid #2a2a4a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 20px;
+            background: linear-gradient(90deg, #00d4ff, #7b68ee);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* 三栏布局 */
+        .main-layout {
+            display: grid;
+            grid-template-columns: 280px 1fr 320px;
+            gap: 0;
+            height: calc(100vh - 60px);
+            overflow: hidden;
+        }
+
+        /* 左侧面板 - 配置 */
+        .left-panel {
+            background: #16162a;
+            border-right: 1px solid #2a2a4a;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        /* 中间面板 - 截图可视化 */
+        .center-panel {
+            background: #0a0a14;
+            overflow: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* 右侧面板 - 结果 */
+        .right-panel {
+            background: #16162a;
+            border-left: 1px solid #2a2a4a;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        /* 卡片 */
+        .card {
+            background: #1e1e38;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            border: 1px solid #2a2a4a;
+        }
+        .card h3 {
+            font-size: 14px;
+            color: #00d4ff;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card h3 > span:not(:first-child) {
+            margin-left: auto;
+        }
+        .card h3::before {
+            content: '';
+            width: 4px;
+            height: 16px;
+            background: linear-gradient(180deg, #00d4ff, #7b68ee);
+            border-radius: 2px;
+        }
+
+        /* 表单 */
+        .form-group { margin-bottom: 12px; }
+        .form-group label {
+            display: block;
+            margin-bottom: 4px;
+            color: #888;
+            font-size: 12px;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #3a3a5a;
+            border-radius: 8px;
+            background: #0f0f1a;
+            color: #eee;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #00d4ff;
+            box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
+        }
+
+        /* 按钮 */
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #00d4ff, #7b68ee);
+            color: #0a0a14;
+        }
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+        }
+        .btn-primary:disabled {
+            background: #3a3a5a;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        .btn-secondary {
+            background: #2a2a4a;
+            color: #aaa;
+        }
+        .btn-secondary:hover {
+            background: #3a3a5a;
+            color: #fff;
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #00d4aa, #00a88a);
+            color: #0a0a14;
+        }
+
+        /* 状态指示器 */
+        .status {
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            margin-bottom: 12px;
+        }
+        .status.success {
+            background: rgba(0, 212, 170, 0.1);
+            border: 1px solid #00d4aa;
+            color: #00d4aa;
+        }
+        .status.error {
+            background: rgba(233, 69, 96, 0.1);
+            border: 1px solid #e94560;
+            color: #e94560;
+        }
+        .status.warning {
+            background: rgba(255, 193, 7, 0.1);
+            border: 1px solid #ffc107;
+            color: #ffc107;
+        }
+
+        /* 截图容器 */
+        .screenshot-container {
+            position: relative;
+            display: inline-block;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+        .screenshot-container img {
+            display: block;
+            max-width: 100%;
+            max-height: 70vh;
+        }
+        .screenshot-container canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+
+        /* 页面描述 */
+        .page-description {
+            background: linear-gradient(135deg, #1e1e38, #2a2a4a);
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border-left: 4px solid #00d4ff;
+        }
+        .page-description h4 {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .page-description p {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #ddd;
+        }
+
+        /* UI 元素列表 */
+        .ui-elements {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .ui-element {
+            background: #1a1a2e;
+            border: 1px solid #2a2a4a;
+            border-radius: 8px;
+            padding: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .ui-element:hover {
+            border-color: #00d4ff;
+            background: #252542;
+        }
+        .ui-element.highlight {
+            border-color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+        }
+        .ui-element-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .ui-element-type {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #3a3a5a;
+            color: #aaa;
+        }
+        .ui-element-type.button { background: rgba(0, 212, 255, 0.2); color: #00d4ff; }
+        .ui-element-type.text { background: rgba(123, 104, 238, 0.2); color: #7b68ee; }
+        .ui-element-type.icon { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .ui-element-type.input { background: rgba(0, 212, 170, 0.2); color: #00d4aa; }
+        .ui-element-text {
+            font-size: 13px;
+            color: #fff;
+            margin-bottom: 4px;
+        }
+        .ui-element-ocr {
+            font-size: 11px;
+            color: #888;
+            font-style: italic;
+        }
+        .ui-element-bbox {
+            font-size: 10px;
+            color: #666;
+            font-family: monospace;
+        }
+
+        /* 统计卡片 */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .stat-item {
+            background: #1a1a2e;
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #00d4ff, #7b68ee);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .stat-label {
+            font-size: 11px;
+            color: #888;
+            margin-top: 4px;
+        }
+
+        /* 工具栏 */
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        /* 页面列表 */
+        .page-list {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .page-item {
+            background: #1a1a2e;
+            padding: 10px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+        }
+        .page-item:hover {
+            border-color: #00d4ff;
+        }
+        .page-item.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: #00d4ff;
+        }
+        .page-item-name {
+            font-size: 13px;
+            color: #fff;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .page-item-desc {
+            font-size: 11px;
+            color: #888;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* 日志 */
+        .logs {
+            background: #0a0a14;
+            border-radius: 8px;
+            padding: 12px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 11px;
+        }
+        .log-entry {
+            margin-bottom: 4px;
+            line-height: 1.4;
+        }
+        .log-time { color: #666; margin-right: 8px; }
+        .log-info { color: #00d4ff; }
+        .log-warn { color: #ffc107; }
+        .log-error { color: #e94560; }
+
+        /* 进度条 */
+        .progress {
+            height: 4px;
+            background: #2a2a4a;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00d4ff, #7b68ee);
+            transition: width 0.3s;
+        }
+
+        /* 滚动条 */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #0f0f1a; }
+        ::-webkit-scrollbar-thumb { background: #3a3a5a; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4a4a6a; }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #666;
+        }
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        /* Loading */
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #3a3a5a;
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .hidden { display: none !important; }
+
+        /* 标签 */
+        .section-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 12px;
+            background: #0f0f1a;
+            padding: 4px;
+            border-radius: 8px;
+        }
+        .section-tab {
+            flex: 1;
+            padding: 8px;
+            border: none;
+            background: transparent;
+            color: #888;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        .section-tab.active {
+            background: #2a2a4a;
+            color: #fff;
+        }
+        .section-tab:hover:not(.active) {
+            background: #1a1a2e;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 LXB Map Builder v2</h1>
+        <div style="display: flex; gap: 12px; align-items: center;">
+            <span id="connection-status" class="status" style="margin: 0; padding: 6px 12px;">
+                <span class="loading"></span> 连接中...
+            </span>
+        </div>
+    </div>
+
+    <div class="main-layout">
+        <!-- 左侧面板 - 配置 -->
+        <div class="left-panel">
+            <!-- VLM 配置 -->
+            <div class="card">
+                <h3 style="display: flex; align-items: center;">
+                    🔧 VLM 配置
+                    <span id="config-badge" style="font-size: 10px; background: #3a3a5a; padding: 2px 6px; border-radius: 4px; margin-left: auto; display: none;">已保存</span>
+                </h3>
+                <div class="form-group">
+                    <label>API Base URL</label>
+                    <input type="text" id="vlm-api-url" placeholder="https://api.example.com/v1">
+                </div>
+                <div class="form-group">
+                    <label>API Key</label>
+                    <input type="password" id="vlm-api-key" placeholder="sk-xxx">
+                </div>
+                <div class="form-group">
+                    <label>模型名称</label>
+                    <input type="text" id="vlm-model-name" value="qwen-vl-plus">
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn btn-primary" style="flex: 1;" onclick="saveVLMConfig()">💾 保存</button>
+                    <button class="btn btn-secondary" onclick="loadVLMConfig()">🔄 刷新</button>
+                    <button class="btn btn-secondary" onclick="clearVLMConfig()" title="清除保存的配置">🗑</button>
+                </div>
+            </div>
+
+            <!-- VLM 状态 -->
+            <div class="card">
+                <h3>📊 VLM 状态</h3>
+                <div id="vlm-status" class="status warning">未检测</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button class="btn btn-secondary" onclick="checkVLMStatus()">刷新状态</button>
+                    <button class="btn btn-secondary" onclick="testVLM()">测试推理</button>
+                </div>
+            </div>
+
+            <!-- 探索配置 -->
+            <div class="card">
+                <h3>🎯 探索配置</h3>
+                <div class="form-group">
+                    <label>应用包名</label>
+                    <input type="text" id="package-name" placeholder="com.example.app">
+                </div>
+                <div class="form-group">
+                    <label>最大页面数</label>
+                    <input type="number" id="max-pages" value="30" min="1" max="100">
+                </div>
+                <div class="form-group">
+                    <label>最大深度</label>
+                    <input type="number" id="max-depth" value="5" min="1" max="20">
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn btn-success" id="btn-start" style="flex: 1;" onclick="startExploration()">
+                        ▶ 开始探索
+                    </button>
+                    <button class="btn btn-danger hidden" id="btn-stop" onclick="stopExploration()">⏹ 停止</button>
+                </div>
+            </div>
+
+            <!-- 探索日志 -->
+            <div class="card" style="flex: 1; display: flex; flex-direction: column;">
+                <h3>📝 探索日志</h3>
+                <div class="progress">
+                    <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                </div>
+                <div class="logs" id="logs"></div>
+            </div>
+        </div>
+
+        <!-- 中间面板 - 截图可视化 -->
+        <div class="center-panel" id="center-panel">
+            <div class="toolbar" style="width: 100%; max-width: 500px;">
+                <button class="btn btn-secondary" onclick="captureAndAnalyze()">
+                    📸 截图并分析
+                </button>
+                <button class="btn btn-secondary" onclick="getScreenshot()">
+                    🖼 刷新截图
+                </button>
+            </div>
+
+            <div id="screenshot-area">
+                <div class="empty-state">
+                    <div class="empty-state-icon">📱</div>
+                    <p>点击"截图并分析"开始分析当前页面</p>
+                </div>
+            </div>
+
+            <div id="analysis-result" class="hidden" style="width: 100%; max-width: 500px; margin-top: 20px;">
+                <div class="page-description">
+                    <h4>🤖 VLM 页面分析</h4>
+                    <p id="page-caption">暂无描述</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧面板 - 结果 -->
+        <div class="right-panel">
+            <div class="section-tabs">
+                <button class="section-tab active" onclick="switchRightTab('elements')">UI 元素</button>
+                <button class="section-tab" onclick="switchRightTab('pages')">页面列表</button>
+            </div>
+
+            <!-- UI 元素面板 -->
+            <div id="tab-elements">
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value" id="stat-total">0</div>
+                        <div class="stat-label">匹配元素</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="stat-clickable">0</div>
+                        <div class="stat-label">可点击</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="stat-vlm">0</div>
+                        <div class="stat-label">VLM 检测</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="stat-unmatched">0</div>
+                        <div class="stat-label">未匹配</div>
+                    </div>
+                </div>
+
+                <div class="ui-elements" id="ui-elements">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔍</div>
+                        <p>暂无UI元素</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 页列表面板 -->
+            <div id="tab-pages" class="hidden">
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value" id="stat-pages">0</div>
+                        <div class="stat-label">发现页面</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="stat-transitions">0</div>
+                        <div class="stat-label">页面跳转</div>
+                    </div>
+                </div>
+
+                <div class="page-list" id="page-list">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📄</div>
+                        <p>暂无页面</p>
+                    </div>
+                </div>
+
+                <div style="margin-top: 16px;">
+                    <button class="btn btn-secondary" style="width: 100%;" onclick="saveResult()">
+                        💾 保存结果
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+        let currentScreenshot = null;
+        let currentAnalysis = null;
+        let logIndex = 0;
+        let pollInterval = null;
+
+        // 页面加载时初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            loadVLMConfig();
+            checkVLMStatus();
+            checkConnection();
+            setInterval(checkConnection, 5000);
+
+            // 如果从 localStorage 加载了配置，显示提示
+            if (localStorage.getItem('vlm_config')) {
+                setTimeout(() => {
+                    addLog('info', '已加载保存的配置');
+                }, 500);
+            }
+        });
+
+        // 检查连接状态
+        async function checkConnection() {
+            try {
+                const res = await fetch(`${API_BASE}/api/status`);
+                const data = await res.json();
+                const statusEl = document.getElementById('connection-status');
+
+                if (data.connected) {
+                    statusEl.className = 'status success';
+                    statusEl.style.margin = '0';
+                    statusEl.style.padding = '6px 12px';
+                    statusEl.textContent = `● 已连接 (${data.host}:${data.port})`;
+                } else {
+                    statusEl.className = 'status error';
+                    statusEl.style.margin = '0';
+                    statusEl.style.padding = '6px 12px';
+                    statusEl.textContent = '○ 未连接';
+                }
+            } catch (e) {
+                document.getElementById('connection-status').className = 'status error';
+                document.getElementById('connection-status').textContent = '○ 连接失败';
+            }
+        }
+
+        // 加载 VLM 配置（优先从 localStorage，然后同步到后端）
+        async function loadVLMConfig() {
+            const badge = document.getElementById('config-badge');
+
+            // 先从 localStorage 读取
+            const localConfig = localStorage.getItem('vlm_config');
+            if (localConfig) {
+                try {
+                    const config = JSON.parse(localConfig);
+                    document.getElementById('vlm-api-url').value = config.api_base_url || '';
+                    document.getElementById('vlm-api-key').value = config.api_key || '';
+                    document.getElementById('vlm-model-name').value = config.model_name || 'qwen-vl-plus';
+                    document.getElementById('package-name').value = config.package_name || '';
+                    document.getElementById('max-pages').value = config.max_pages || 30;
+                    document.getElementById('max-depth').value = config.max_depth || 5;
+                    badge.style.display = 'inline';
+                } catch (e) {
+                    console.error('Parse localStorage error:', e);
+                    badge.style.display = 'none';
+                }
+            } else {
+                badge.style.display = 'none';
+            }
+
+            // 然后从后端读取（如果 localStorage 有值，则同步到后端）
+            try {
+                const res = await fetch(`${API_BASE}/api/vlm/config`);
+                const data = await res.json();
+                if (data.success && !localConfig) {
+                    // 只在 localStorage 为空时才使用后端的值
+                    document.getElementById('vlm-api-url').value = data.data.api_base_url || '';
+                    document.getElementById('vlm-api-key').value = data.data.api_key || '';
+                    document.getElementById('vlm-model-name').value = data.data.model_name || 'qwen-vl-plus';
+                }
+            } catch (e) {
+                console.error('Load config error:', e);
+            }
+        }
+
+        // 保存 VLM 配置（同时保存到 localStorage 和后端）
+        async function saveVLMConfig() {
+            const config = {
+                api_base_url: document.getElementById('vlm-api-url').value.trim(),
+                api_key: document.getElementById('vlm-api-key').value.trim(),
+                model_name: document.getElementById('vlm-model-name').value.trim(),
+                package_name: document.getElementById('package-name').value.trim(),
+                max_pages: parseInt(document.getElementById('max-pages').value) || 30,
+                max_depth: parseInt(document.getElementById('max-depth').value) || 5
+            };
+
+            if (!config.api_base_url || !config.api_key) {
+                alert('请填写完整的 API 配置');
+                return;
+            }
+
+            // 保存到 localStorage
+            localStorage.setItem('vlm_config', JSON.stringify(config));
+            document.getElementById('config-badge').style.display = 'inline';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/vlm/config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    addLog('info', '✓ 配置已保存（本地+服务器）');
+                    checkVLMStatus();
+                } else {
+                    addLog('error', data.message);
+                }
+            } catch (e) {
+                addLog('error', `保存失败: ${e.message}`);
+            }
+        }
+
+        // 检查 VLM 状态
+        async function checkVLMStatus() {
+            const statusEl = document.getElementById('vlm-status');
+            try {
+                const res = await fetch(`${API_BASE}/api/debug/vlm_status`);
+                const data = await res.json();
+
+                if (data.success && data.data.available && data.data.api_configured) {
+                    statusEl.className = 'status success';
+                    statusEl.textContent = `✓ 已配置 - ${data.data.model_name}`;
+                } else {
+                    statusEl.className = 'status warning';
+                    statusEl.textContent = '✗ 未配置 API';
+                }
+            } catch (e) {
+                statusEl.className = 'status error';
+                statusEl.textContent = '✗ 检测失败';
+            }
+        }
+
+        // 清除保存的配置
+        function clearVLMConfig() {
+            if (confirm('确定要清除保存的配置吗？')) {
+                localStorage.removeItem('vlm_config');
+                document.getElementById('vlm-api-url').value = '';
+                document.getElementById('vlm-api-key').value = '';
+                document.getElementById('vlm-model-name').value = 'qwen-vl-plus';
+                document.getElementById('package-name').value = '';
+                document.getElementById('max-pages').value = 30;
+                document.getElementById('max-depth').value = 5;
+                document.getElementById('config-badge').style.display = 'none';
+                addLog('info', '配置已清除');
+                checkVLMStatus();
+            }
+        }
+
+        // 测试 VLM
+        async function testVLM() {
+            addLog('info', '测试 VLM 推理...');
+            try {
+                const res = await fetch(`${API_BASE}/api/debug/vlm_test`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    addLog('info', `测试成功: ${data.message}`);
+                } else {
+                    addLog('error', data.message);
+                }
+            } catch (e) {
+                addLog('error', `测试失败: ${e.message}`);
+            }
+        }
+
+        // 获取截图
+        async function getScreenshot() {
+            try {
+                const res = await fetch(`${API_BASE}/api/command/screenshot`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success && data.response.image) {
+                    currentScreenshot = data.response.image;
+                    displayScreenshot(data.response.image);
+                } else {
+                    addLog('error', '截图失败');
+                }
+            } catch (e) {
+                addLog('error', `截图失败: ${e.message}`);
+            }
+        }
+
+        // 显示截图
+        function displayScreenshot(base64Image) {
+            const area = document.getElementById('screenshot-area');
+            area.innerHTML = `
+                <div class="screenshot-container">
+                    <img src="data:image/jpeg;base64,${base64Image}" id="screenshot-img" crossorigin="anonymous">
+                    <canvas id="screenshot-canvas"></canvas>
+                </div>
+            `;
+
+            const img = document.getElementById('screenshot-img');
+            const canvas = document.getElementById('screenshot-canvas');
+
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                canvas.style.width = img.width + 'px';
+                canvas.style.height = img.height + 'px';
+            };
+        }
+
+        // 绘制检测框 - 接收像素坐标
+        function drawBBoxes(nodes, imageWidth, imageHeight) {
+            const canvas = document.getElementById('screenshot-canvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const img = document.getElementById('screenshot-img');
+
+            // 计算缩放比例（图片可能被缩放显示）
+            const scaleX = img.width / imageWidth;
+            const scaleY = img.height / imageHeight;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 颜色映射
+            const colors = {
+                button: '#00d4ff',
+                icon: '#ffc107',
+                text: '#7b68ee',
+                input: '#00d4aa',
+                image: '#ff6b6b',
+                default: '#00d4ff'
+            };
+
+            nodes.forEach((node, idx) => {
+                const [x1, y1, x2, y2] = node.bounds;
+                const color = colors[node.vlm_label?.toLowerCase()] || colors.default;
+
+                // 绘制边框
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(
+                    x1 * scaleX,
+                    y1 * scaleY,
+                    (x2 - x1) * scaleX,
+                    (y2 - y1) * scaleY
+                );
+
+                // 绘制序号标签
+                const labelWidth = 24;
+                const labelHeight = 18;
+                ctx.fillStyle = color;
+                ctx.fillRect(x1 * scaleX, y1 * scaleY - labelHeight, labelWidth, labelHeight);
+                ctx.fillStyle = '#000';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(idx + 1, x1 * scaleX + labelWidth / 2, y1 * scaleY - 5);
+            });
+        }
+
+        // 截图并分析
+        async function captureAndAnalyze() {
+            addLog('info', '截图并分析页面...');
+
+            try {
+                // 先获取截图
+                const res1 = await fetch(`${API_BASE}/api/command/screenshot`, { method: 'POST' });
+                const data1 = await res1.json();
+                if (!data1.success) {
+                    addLog('error', '截图失败');
+                    return;
+                }
+
+                currentScreenshot = data1.response.image;
+                displayScreenshot(data1.response.image);
+
+                // 然后分析
+                addLog('info', 'VLM 分析中...');
+                const res2 = await fetch(`${API_BASE}/api/debug/analyze_page`, { method: 'POST' });
+                const data2 = await res2.json();
+
+                if (data2.success) {
+                    currentAnalysis = data2.response;
+                    const resp = data2.response;
+
+                    // 显示页面描述
+                    document.getElementById('page-caption').textContent =
+                        resp.page_description || '暂无描述';
+                    document.getElementById('analysis-result').classList.remove('hidden');
+
+                    // 显示统计
+                    const stats = resp.fusion_stats || {};
+                    document.getElementById('stat-vlm').textContent = stats.vlm_detections || 0;
+                    document.getElementById('stat-unmatched').textContent = stats.unmatched_vlm || 0;
+
+                    // 打印调试信息到控制台
+                    console.log('=== VLM 原始检测 (前20个) ===');
+                    console.log('图片尺寸:', resp.image_size);
+                    (resp.vlm_raw || []).forEach((det, i) => {
+                        console.log(`${i}: [${det.bbox.join(', ')}] ${det.label} - ${det.text}`);
+                    });
+                    console.log('=== XML 节点样本 (前5个) ===');
+                    (resp.xml_sample || []).forEach((node, i) => {
+                        console.log(`${i}: [${node.bounds.join(', ')}] ${node.class} - ${node.text}`);
+                    });
+
+                    // 如果有匹配结果，显示融合节点
+                    const nodes = resp.nodes || [];
+                    if (nodes.length > 0) {
+                        displayUIElements(nodes);
+                        // 绘制融合节点的检测框
+                        if (resp.image_size) {
+                            const [imgWidth, imgHeight] = resp.image_size;
+                            const img = document.getElementById('screenshot-img');
+                            const draw = () => drawBBoxes(nodes, imgWidth, imgHeight);
+                            img.complete ? draw() : (img.onload = draw);
+                        }
+                    } else {
+                        // 没有匹配，直接显示 VLM 原始检测
+                        addLog('warn', '没有匹配到 XML 节点，显示 VLM 原始检测');
+                        displayVLMRaw(resp.vlm_raw || []);
+                        // 绘制 VLM 原始检测框
+                        if (resp.image_size && resp.vlm_raw) {
+                            const [imgWidth, imgHeight] = resp.image_size;
+                            const img = document.getElementById('screenshot-img');
+                            const draw = () => drawVLMBBoxes(resp.vlm_raw, imgWidth, imgHeight);
+                            img.complete ? draw() : (img.onload = draw);
+                        }
+                    }
+
+                    addLog('info', `${data2.message} (${resp.vlm_time_ms}ms)`);
+                } else {
+                    addLog('error', data2.message);
+                    if (data2.traceback) {
+                        console.error(data2.traceback);
+                    }
+                }
+            } catch (e) {
+                addLog('error', `分析失败: ${e.message}`);
+                console.error(e);
+            }
+        }
+
+        // 显示 VLM 原始检测结果
+        function displayVLMRaw(vlmRaw) {
+            const container = document.getElementById('ui-elements');
+            const totalEl = document.getElementById('stat-total');
+            const clickableEl = document.getElementById('stat-clickable');
+
+            totalEl.textContent = vlmRaw.length;
+            clickableEl.textContent = '-';
+
+            if (vlmRaw.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔍</div>
+                        <p>VLM 未检测到元素</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = vlmRaw.map((det, idx) => `
+                <div class="ui-element" data-index="${idx}">
+                    <div class="ui-element-header">
+                        <span class="ui-element-type ${det.label}">${det.label}</span>
+                        <span style="font-size: 10px; color: #888;">#${idx + 1}</span>
+                    </div>
+                    <div class="ui-element-text">${det.text || '(无文本)'}</div>
+                    <div class="ui-element-ocr" style="color: #ff6b6b;">bbox: [${det.bbox.join(', ')}]</div>
+                </div>
+            `).join('');
+        }
+
+        // 绘制 VLM 原始检测框（像素坐标）
+        function drawVLMBBoxes(vlmRaw, imageWidth, imageHeight) {
+            const canvas = document.getElementById('screenshot-canvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const img = document.getElementById('screenshot-img');
+            const scaleX = img.width / imageWidth;
+            const scaleY = img.height / imageHeight;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            vlmRaw.forEach((det, idx) => {
+                const [x1, y1, x2, y2] = det.bbox;
+
+                // 绘制边框 - 红色表示未匹配
+                ctx.strokeStyle = '#ff6b6b';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(
+                    x1 * scaleX,
+                    y1 * scaleY,
+                    (x2 - x1) * scaleX,
+                    (y2 - y1) * scaleY
+                );
+
+                // 绘制序号
+                ctx.fillStyle = '#ff6b6b';
+                ctx.fillRect(x1 * scaleX, y1 * scaleY - 16, 20, 16);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(idx + 1, x1 * scaleX + 10, y1 * scaleY - 4);
+            });
+
+            addLog('info', `绘制了 ${vlmRaw.length} 个 VLM 检测框`);
+        }
+
+        // 显示UI元素
+        function displayUIElements(nodes) {
+            const container = document.getElementById('ui-elements');
+            const totalEl = document.getElementById('stat-total');
+            const clickableEl = document.getElementById('stat-clickable');
+
+            totalEl.textContent = nodes.length;
+            clickableEl.textContent = nodes.filter(n => n.clickable).length;
+
+            if (nodes.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔍</div>
+                        <p>未检测到重要 UI 元素</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = nodes.map((node, idx) => `
+                <div class="ui-element" onclick="highlightElement(${idx})" data-index="${idx}">
+                    <div class="ui-element-header">
+                        <span class="ui-element-type ${getElementClass(node)}">${node.vlm_label || 'element'}</span>
+                        <span style="font-size: 10px; color: #666;">IoU: ${(node.iou_score || 0).toFixed(2)}</span>
+                    </div>
+                    <div class="ui-element-text">${getElementText(node)}</div>
+                    ${node.resource_id ? `<div class="ui-element-ocr">ID: ${node.resource_id}</div>` : ''}
+                    ${node.vlm_ocr_text ? `<div class="ui-element-ocr">OCR: ${node.vlm_ocr_text}</div>` : ''}
+                </div>
+            `).join('');
+        }
+
+        // 获取元素类型
+        function getElementType(node) {
+            if (node.editable) return 'input';
+            if (node.vlm_label) {
+                const label = node.vlm_label.toLowerCase();
+                if (label.includes('button')) return 'button';
+                if (label.includes('icon')) return 'icon';
+                if (label.includes('text')) return 'text';
+            }
+            if (node.clickable) return 'button';
+            if (node.text) return 'text';
+            return 'element';
+        }
+
+        // 获取元素CSS类
+        function getElementClass(node) {
+            const type = getElementType(node);
+            return ['button', 'text', 'icon', 'input'].includes(type) ? type : '';
+        }
+
+        // 获取元素文本
+        function getElementText(node) {
+            if (node.text) return node.text;
+            if (node.resource_id) return node.resource_id;
+            if (node.vlm_label) return node.vlm_label;
+            if (node.content_desc) return node.content_desc;
+            return node.class_name.split('.').pop();
+        }
+
+        // 高亮元素
+        function highlightElement(idx) {
+            document.querySelectorAll('.ui-element').forEach(el => {
+                el.classList.remove('highlight');
+            });
+            document.querySelector(`.ui-element[data-index="${idx}"]`)?.classList.add('highlight');
+        }
+
+        // 切换右侧标签
+        function switchRightTab(tab) {
+            document.querySelectorAll('.section-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.section-tab[onclick="switchRightTab('${tab}')"]`).classList.add('active');
+
+            document.getElementById('tab-elements').classList.toggle('hidden', tab !== 'elements');
+            document.getElementById('tab-pages').classList.toggle('hidden', tab !== 'pages');
+
+            if (tab === 'pages') {
+                refreshPages();
+            }
+        }
+
+        // 开始探索
+        async function startExploration() {
+            const packageName = document.getElementById('package-name').value.trim();
+            if (!packageName) {
+                alert('请输入应用包名');
+                return;
+            }
+
+            const config = {
+                package: packageName,
+                max_pages: parseInt(document.getElementById('max-pages').value),
+                max_depth: parseInt(document.getElementById('max-depth').value)
+            };
+
+            document.getElementById('btn-start').classList.add('hidden');
+            document.getElementById('btn-stop').classList.remove('hidden');
+            document.getElementById('logs').innerHTML = '';
+            logIndex = 0;
+
+            addLog('info', `开始探索: ${packageName}`);
+            pollInterval = setInterval(pollLogs, 1000);
+
+            try {
+                const res = await fetch(`${API_BASE}/api/explore/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const data = await res.json();
+
+                clearInterval(pollInterval);
+
+                if (data.success) {
+                    addLog('info', data.message);
+                    updateStats(data.result);
+                    switchRightTab('pages');
+                } else {
+                    addLog('error', data.message);
+                }
+            } catch (e) {
+                clearInterval(pollInterval);
+                addLog('error', `探索失败: ${e.message}`);
+            }
+
+            document.getElementById('btn-start').classList.remove('hidden');
+            document.getElementById('btn-stop').classList.add('hidden');
+        }
+
+        // 轮询日志
+        async function pollLogs() {
+            try {
+                const res = await fetch(`${API_BASE}/api/explore/logs?since=${logIndex}`);
+                const data = await res.json();
+
+                if (data.success && data.logs.length > 0) {
+                    data.logs.forEach(log => {
+                        addLog(log.level, `[${log.time}] ${log.message}`);
+                    });
+                    logIndex = data.total;
+                }
+
+                const statusRes = await fetch(`${API_BASE}/api/explore/status`);
+                const status = await statusRes.json();
+
+                if (status.progress) {
+                    const pages = status.progress.pages_discovered || 0;
+                    const maxPages = parseInt(document.getElementById('max-pages').value);
+                    const percent = Math.min(100, (pages / maxPages) * 100);
+                    document.getElementById('progress-fill').style.width = `${percent}%`;
+                }
+            } catch (e) {
+                console.error('Poll error:', e);
+            }
+        }
+
+        // 刷新页面列表
+        async function refreshPages() {
+            try {
+                const res = await fetch(`${API_BASE}/api/explore/result/pages`);
+                const data = await res.json();
+
+                if (data.success) {
+                    document.getElementById('stat-pages').textContent = data.data.length;
+
+                    const listEl = document.getElementById('page-list');
+                    if (data.data.length === 0) {
+                        listEl.innerHTML = `
+                            <div class="empty-state">
+                                <div class="empty-state-icon">📄</div>
+                                <p>暂无页面</p>
+                            </div>
+                        `;
+                        return;
+                    }
+
+                    listEl.innerHTML = data.data.map(page => `
+                        <div class="page-item" onclick="showPageDetail('${page.page_id}')">
+                            <div class="page-item-name">${page.page_id}</div>
+                            <div class="page-item-desc">${page.description || '无描述'}</div>
+                            <div style="font-size: 10px; color: #666; margin-top: 4px;">
+                                节点: ${page.node_count} | 可点击: ${page.clickable_count}
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            } catch (e) {
+                console.error('Refresh error:', e);
+            }
+        }
+
+        // 显示页面详情
+        async function showPageDetail(pageId) {
+            try {
+                const res = await fetch(`${API_BASE}/api/explore/result/page/${pageId}`);
+                const data = await res.json();
+
+                if (data.success) {
+                    // 切换到元素面板
+                    switchRightTab('elements');
+
+                    // 显示元素
+                    displayUIElements(data.data.nodes || []);
+
+                    // 更新描述
+                    document.getElementById('page-caption').textContent =
+                        data.data.description || '暂无描述';
+                    document.getElementById('analysis-result').classList.remove('hidden');
+
+                    addLog('info', `加载页面: ${pageId}`);
+                }
+            } catch (e) {
+                addLog('error', `加载页面失败: ${e.message}`);
+            }
+        }
+
+        // 更新统计
+        function updateStats(result) {
+            if (result) {
+                document.getElementById('stat-pages').textContent = result.pages || 0;
+                document.getElementById('stat-transitions').textContent = result.transitions || 0;
+            }
+        }
+
+        // 保存结果
+        async function saveResult() {
+            try {
+                const res = await fetch(`${API_BASE}/api/explore/save`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    addLog('info', data.message);
+                    alert(`已保存到: ${data.path}`);
+                } else {
+                    addLog('error', data.message);
+                }
+            } catch (e) {
+                addLog('error', `保存失败: ${e.message}`);
+            }
+        }
+
+        // 添加日志
+        function addLog(level, message) {
+            const logsEl = document.getElementById('logs');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">${time}</span><span class="log-${level}">${message}</span>`;
+            logsEl.appendChild(entry);
+            logsEl.scrollTop = logsEl.scrollHeight;
+        }
+
+        // 停止探索
+        function stopExploration() {
+            addLog('warn', '停止功能暂未实现');
+        }
+    </script>
+</body>
+</html>

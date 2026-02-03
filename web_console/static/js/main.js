@@ -179,6 +179,10 @@ function handleCommand(cmd) {
             sendCommand('/api/command/stop_app', { package: stopPkg }, `STOP_APP ${stopPkg}`);
             break;
 
+        case 'list_apps':
+            listApps();
+            break;
+
         // =============================================================
         // Media Layer
         // =============================================================
@@ -1147,4 +1151,141 @@ function renderActionNode(node, type) {
     });
 
     return div;
+}
+
+/**
+ * 获取已安装应用列表
+ */
+async function listApps() {
+    if (!state.connected) {
+        addLog('error', '未连接到设备');
+        return;
+    }
+
+    const filter = document.getElementById('app-filter').value;
+    const filterNames = { 'user': '用户应用', 'system': '系统应用', 'all': '全部应用' };
+
+    addLog('command', `-> LIST_APPS (${filterNames[filter]})`);
+    state.stats.sent++;
+    updateStats();
+
+    try {
+        const response = await fetch('/api/command/list_apps', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filter })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            state.stats.success++;
+            addLog('response', `<- ${result.message}`);
+
+            // 显示应用列表查看器
+            if (result.response && result.response.apps) {
+                showAppsViewer(result.response.apps, result.response.filter);
+            }
+        } else {
+            state.stats.failed++;
+            addLog('error', `X ${result.message}`);
+        }
+    } catch (error) {
+        state.stats.failed++;
+        addLog('error', `X 请求失败: ${error.message}`);
+    }
+
+    updateStats();
+}
+
+/**
+ * 显示应用列表查看器 (模态对话框)
+ */
+function showAppsViewer(apps, filter) {
+    const modal = document.getElementById('apps-modal');
+    const listContainer = document.getElementById('apps-list');
+    const statsDiv = document.getElementById('apps-stats');
+    const closeBtn = document.getElementById('btn-close-apps');
+    const searchInput = document.getElementById('apps-search');
+
+    const filterNames = { 'user': '用户应用', 'system': '系统应用', 'all': '全部应用' };
+
+    // 显示统计信息
+    statsDiv.innerHTML = `
+        <span class="stat-badge">${apps.length} 个应用</span>
+        <span class="stat-badge">${filterNames[filter] || filter}</span>`;
+
+    // 清空并渲染列表
+    listContainer.innerHTML = '';
+
+    apps.forEach((pkg, index) => {
+        const item = document.createElement('div');
+        item.className = 'app-item';
+        item.innerHTML = `
+            <span class="app-index">${index + 1}</span>
+            <span class="app-package">${pkg}</span>
+            <div class="app-actions">
+                <button class="btn btn-tiny btn-primary" data-action="launch" data-pkg="${pkg}">启动</button>
+                <button class="btn btn-tiny btn-danger" data-action="stop" data-pkg="${pkg}">停止</button>
+            </div>`;
+
+        // 点击复制包名
+        item.querySelector('.app-package').addEventListener('click', () => {
+            navigator.clipboard.writeText(pkg).then(() => {
+                addLog('info', `已复制包名: ${pkg}`);
+            }).catch(() => {
+                addLog('info', `包名: ${pkg}`);
+            });
+        });
+
+        // 启动按钮
+        item.querySelector('[data-action="launch"]').addEventListener('click', (e) => {
+            e.stopPropagation();
+            document.getElementById('app-package').value = pkg;
+            sendCommand('/api/command/launch_app', { package: pkg }, `LAUNCH_APP ${pkg}`);
+        });
+
+        // 停止按钮
+        item.querySelector('[data-action="stop"]').addEventListener('click', (e) => {
+            e.stopPropagation();
+            document.getElementById('app-package').value = pkg;
+            sendCommand('/api/command/stop_app', { package: pkg }, `STOP_APP ${pkg}`);
+        });
+
+        listContainer.appendChild(item);
+    });
+
+    if (apps.length === 0) {
+        listContainer.innerHTML = '<div class="flat-empty">没有找到应用</div>';
+    }
+
+    // 显示模态对话框
+    modal.style.display = 'flex';
+
+    // 绑定关闭按钮
+    closeBtn.onclick = () => modal.style.display = 'none';
+
+    // 点击背景关闭
+    modal.onclick = (e) => {
+        if (e.target === modal) modal.style.display = 'none';
+    };
+
+    // ESC 键关闭
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            modal.style.display = 'none';
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+
+    // 搜索功能
+    searchInput.value = '';
+    searchInput.oninput = () => {
+        const query = searchInput.value.toLowerCase().trim();
+        listContainer.querySelectorAll('.app-item').forEach(item => {
+            const pkg = item.querySelector('.app-package').textContent.toLowerCase();
+            item.style.display = (!query || pkg.includes(query)) ? '' : 'none';
+        });
+    };
 }

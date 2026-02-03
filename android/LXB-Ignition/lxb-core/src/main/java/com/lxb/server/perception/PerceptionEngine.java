@@ -1256,11 +1256,11 @@ public class PerceptionEngine {
 
                 action.classId = pool.addShort(info.className);
 
-                // 获取显示文本 - 关键逻辑：如果交互节点没有文本，从子节点获取
+                // 获取显示文本 - 关键逻辑：如果交互节点没有文本，使用边界包含法收集子节点文本
                 String displayText = info.text;
                 if (displayText.isEmpty() && isInteractive) {
-                    // 递归查找第一个有文本的子节点
-                    displayText = findFirstChildTextFromXml(allNodes, i);
+                    // 使用边界包含法收集所有子节点的文本
+                    displayText = collectTextInBoundsFromXml(allNodes, i, info);
                 }
                 if (displayText.isEmpty()) {
                     displayText = info.contentDesc;
@@ -1276,10 +1276,41 @@ public class PerceptionEngine {
     }
 
     /**
-     * 从 XML 节点树中查找第一个有文本的子节点
+     * 从 XML 节点树中使用边界包含法收集文本
+     *
+     * 收集所有边界完全包含在容器节点边界内的后代节点的文本。
+     *
+     * @param allNodes 所有节点列表
+     * @param nodeIndex 容器节点索引
+     * @param containerInfo 容器节点信息 (提供边界)
+     * @return 聚合的文本字符串
      */
-    private String findFirstChildTextFromXml(List<XmlNodeInfo> allNodes, int nodeIndex) {
-        if (nodeIndex < 0 || nodeIndex >= allNodes.size()) return "";
+    private String collectTextInBoundsFromXml(List<XmlNodeInfo> allNodes, int nodeIndex, XmlNodeInfo containerInfo) {
+        List<String> texts = new ArrayList<>();
+        collectTextInBoundsFromXmlRecursive(allNodes, nodeIndex, containerInfo, texts);
+
+        if (texts.isEmpty()) return "";
+
+        // 去重并连接
+        java.util.LinkedHashSet<String> uniqueTexts = new java.util.LinkedHashSet<>(texts);
+        StringBuilder sb = new StringBuilder();
+        for (String t : uniqueTexts) {
+            if (sb.length() > 0) sb.append(" ");
+            sb.append(t);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 递归收集边界内的文本 (XML 版本)
+     */
+    private void collectTextInBoundsFromXmlRecursive(
+            List<XmlNodeInfo> allNodes,
+            int nodeIndex,
+            XmlNodeInfo containerInfo,
+            List<String> texts
+    ) {
+        if (nodeIndex < 0 || nodeIndex >= allNodes.size()) return;
 
         XmlNodeInfo node = allNodes.get(nodeIndex);
 
@@ -1289,22 +1320,24 @@ public class PerceptionEngine {
 
             XmlNodeInfo child = allNodes.get(childIndex);
 
-            // 检查子节点自己的文本
-            if (!child.text.isEmpty()) {
-                return child.text;
-            }
-            if (!child.contentDesc.isEmpty()) {
-                return child.contentDesc;
+            // 检查子节点边界是否完全包含在容器边界内
+            boolean isContained = child.left >= containerInfo.left &&
+                                  child.top >= containerInfo.top &&
+                                  child.right <= containerInfo.right &&
+                                  child.bottom <= containerInfo.bottom;
+
+            if (isContained) {
+                // 收集子节点的文本
+                if (!child.text.isEmpty()) {
+                    texts.add(child.text);
+                } else if (!child.contentDesc.isEmpty()) {
+                    texts.add(child.contentDesc);
+                }
             }
 
             // 递归检查子节点的子节点
-            String childText = findFirstChildTextFromXml(allNodes, childIndex);
-            if (!childText.isEmpty()) {
-                return childText;
-            }
+            collectTextInBoundsFromXmlRecursive(allNodes, childIndex, containerInfo, texts);
         }
-
-        return "";
     }
 
     /**
@@ -1351,10 +1384,10 @@ public class PerceptionEngine {
             CharSequence className = (CharSequence) getClassNameMethod.invoke(node);
             action.classId = pool.addShort(className != null ? className.toString() : "");
 
-            // 获取文本 - 如果自身没有文本，尝试获取第一个有文本的子节点
+            // 获取文本 - 如果自身没有文本，使用边界包含法收集子节点文本
             String displayText = textStr;
             if (displayText.isEmpty() && isInteractive) {
-                displayText = findFirstChildText(node);
+                displayText = getAggregatedTextInBounds(node);
             }
             if (displayText.isEmpty()) {
                 displayText = descStr;
@@ -1382,24 +1415,88 @@ public class PerceptionEngine {
     }
 
     /**
-     * 查找第一个有文本的直接子节点
+     * 收集边界内所有文本 (边界包含法)
+     *
+     * 递归遍历所有后代节点，收集那些边界完全包含在容器边界内的节点的文本。
+     * 这种方法比只检查直接子节点更可靠，能处理嵌套布局的情况。
+     *
+     * @param node 容器节点
+     * @param containerBounds 容器边界 [left, top, right, bottom]
+     * @param texts 收集到的文本列表
      */
-    private String findFirstChildText(Object node) throws Exception {
+    private void collectTextInBounds(Object node, int[] containerBounds, List<String> texts) throws Exception {
+        if (node == null) return;
+
+        // 检查节点是否可见
+        boolean isVisible = (Boolean) isVisibleToUserMethod.invoke(node);
+        if (!isVisible) return;
+
+        // 获取当前节点边界
+        int[] nodeBounds = getNodeBounds(node);
+
+        // 检查节点边界是否完全包含在容器边界内
+        boolean isContained = nodeBounds[0] >= containerBounds[0] &&
+                              nodeBounds[1] >= containerBounds[1] &&
+                              nodeBounds[2] <= containerBounds[2] &&
+                              nodeBounds[3] <= containerBounds[3];
+
+        if (isContained) {
+            // 获取此节点的文本
+            CharSequence text = (CharSequence) getTextMethod.invoke(node);
+            if (text != null && text.length() > 0) {
+                texts.add(text.toString());
+            } else {
+                // 如果没有 text，尝试 contentDescription
+                CharSequence desc = (CharSequence) getContentDescriptionMethod.invoke(node);
+                if (desc != null && desc.length() > 0) {
+                    texts.add(desc.toString());
+                }
+            }
+        }
+
+        // 递归处理子节点
         int childCount = (Integer) getChildCountMethod.invoke(node);
         for (int i = 0; i < childCount; i++) {
             Object child = getChildMethod.invoke(node, i);
             if (child != null) {
-                CharSequence text = (CharSequence) getTextMethod.invoke(child);
-                if (text != null && text.length() > 0) {
-                    return text.toString();
-                }
-                CharSequence desc = (CharSequence) getContentDescriptionMethod.invoke(child);
-                if (desc != null && desc.length() > 0) {
-                    return desc.toString();
-                }
+                collectTextInBounds(child, containerBounds, texts);
             }
         }
-        return "";
+    }
+
+    /**
+     * 获取节点边界内的聚合文本
+     *
+     * 使用边界包含法收集所有后代节点的文本，并用空格连接。
+     * 这解决了嵌套 Layout 中 TextView 不是直接子节点的问题。
+     *
+     * @param node 容器节点
+     * @return 聚合的文本字符串
+     */
+    private String getAggregatedTextInBounds(Object node) throws Exception {
+        int[] bounds = getNodeBounds(node);
+        List<String> texts = new ArrayList<>();
+
+        // 遍历所有子节点，收集边界内的文本
+        int childCount = (Integer) getChildCountMethod.invoke(node);
+        for (int i = 0; i < childCount; i++) {
+            Object child = getChildMethod.invoke(node, i);
+            if (child != null) {
+                collectTextInBounds(child, bounds, texts);
+            }
+        }
+
+        // 去重并连接
+        if (texts.isEmpty()) return "";
+
+        // 使用 LinkedHashSet 去重但保持顺序
+        java.util.LinkedHashSet<String> uniqueTexts = new java.util.LinkedHashSet<>(texts);
+        StringBuilder sb = new StringBuilder();
+        for (String t : uniqueTexts) {
+            if (sb.length() > 0) sb.append(" ");
+            sb.append(t);
+        }
+        return sb.toString();
     }
 
     /**

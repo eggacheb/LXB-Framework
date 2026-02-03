@@ -18,6 +18,7 @@ import com.lxb.server.system.UiAutomationWrapper;
  * - 0x21 KEY_EVENT: 按键事件
  * - 0x43 LAUNCH_APP: 启动应用
  * - 0x44 STOP_APP: 停止应用
+ * - 0x48 LIST_APPS: 获取已安装应用列表
  */
 public class ExecutionEngine {
 
@@ -386,5 +387,40 @@ public class ExecutionEngine {
 
         boolean success = uiAutomation.stopApp(packageName);
         return new byte[]{(byte) (success ? 0x01 : 0x00)};
+    }
+
+    /**
+     * 处理 LIST_APPS 命令 (0x48)
+     *
+     * Payload 格式: filter[1B]
+     *   filter: 0=all, 1=user, 2=system
+     *
+     * @param payload 请求负载 (1 字节)
+     * @return ACK 响应 (1 字节 status + JSON 字符串)
+     */
+    public byte[] handleListApps(byte[] payload) {
+        int filter = 0;  // 默认返回所有应用
+        if (payload.length >= 1) {
+            filter = payload[0] & 0xFF;
+        }
+
+        System.out.println(TAG + " LIST_APPS filter=" + filter);
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[]{0x00};
+        }
+
+        String jsonResult = uiAutomation.listApps(filter);
+        byte[] jsonBytes = jsonResult.getBytes(StandardCharsets.UTF_8);
+
+        // 返回: status[1B] + json_len[2B] + json_data
+        ByteBuffer response = ByteBuffer.allocate(3 + jsonBytes.length);
+        response.order(ByteOrder.BIG_ENDIAN);
+        response.put((byte) 0x01);  // success
+        response.putShort((short) jsonBytes.length);
+        response.put(jsonBytes);
+
+        return response.array();
     }
 }

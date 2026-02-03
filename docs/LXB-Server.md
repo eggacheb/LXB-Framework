@@ -8,7 +8,7 @@
 | **协议版本** | 1.0 (Binary First Architecture)        |
 | **作者**     | WuWei                                   |
 | **创建日期** | 2025-01-01                              |
-| **最后更新** | 2026-01-12                              |
+| **最后更新** | 2026-01-14                              |
 | **状态**     | 开发中 (In Development)                 |
 | **适用范围** | Android 设备端服务器实现                |
 
@@ -939,6 +939,60 @@ public class PerceptionEngine {
         } catch (Exception e) {
             Log.e("LXB", "GET_ACTIVITY failed", e);
             return new byte[]{0x00};
+        }
+    }
+
+    /**
+     * 处理 DUMP_ACTIONS 命令 - 边界包含法文本关联
+     *
+     * 对于没有自身文本的交互节点，使用边界包含法收集子节点文本：
+     * 1. 获取容器节点边界
+     * 2. 递归遍历所有后代节点
+     * 3. 收集边界完全包含在容器内的节点的 text/contentDescription
+     * 4. 去重后用空格连接
+     */
+    public byte[] handleDumpActions(byte[] payload) {
+        // 实现详见 PerceptionEngine.java
+        // 核心方法：
+        // - collectTextInBounds(): 递归收集边界内文本
+        // - getAggregatedTextInBounds(): 聚合并去重
+    }
+
+    /**
+     * 边界包含法核心逻辑
+     *
+     * @param node 容器节点
+     * @param containerBounds 容器边界 [left, top, right, bottom]
+     * @param texts 收集到的文本列表
+     */
+    private void collectTextInBounds(Object node, int[] containerBounds, List<String> texts) {
+        // 检查节点是否可见
+        if (!isVisible(node)) return;
+
+        // 获取当前节点边界
+        int[] nodeBounds = getNodeBounds(node);
+
+        // 边界包含判定
+        boolean isContained = nodeBounds[0] >= containerBounds[0] &&
+                              nodeBounds[1] >= containerBounds[1] &&
+                              nodeBounds[2] <= containerBounds[2] &&
+                              nodeBounds[3] <= containerBounds[3];
+
+        if (isContained) {
+            String text = getText(node);
+            if (text != null && !text.isEmpty()) {
+                texts.add(text);
+            } else {
+                String desc = getContentDescription(node);
+                if (desc != null && !desc.isEmpty()) {
+                    texts.add(desc);
+                }
+            }
+        }
+
+        // 递归处理子节点
+        for (Object child : getChildren(node)) {
+            collectTextInBounds(child, containerBounds, texts);
         }
     }
 
