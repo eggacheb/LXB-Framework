@@ -520,14 +520,14 @@
                     "detail": { name: "详情", description: "内容详情页", features: ["评论", "分享"] }
                 },
                 transitions: [
-                    { from: "home", to: "search", description: "点击搜索" },
-                    { from: "home", to: "profile", description: "点击我的" },
-                    { from: "home", to: "detail", description: "点击内容" },
-                    { from: "profile", to: "settings", description: "点击设置" },
-                    { from: "profile", to: "home", description: "点击首页" },
-                    { from: "search", to: "home", description: "点击首页" },
-                    { from: "search", to: "detail", description: "点击搜索结果" },
-                    { from: "settings", to: "profile", description: "点击返回" }
+                    { from: "home", to: "search", description: "点击搜索", action: { type: "tap", locator: { resource_id: "btn_search", text: "搜索" } } },
+                    { from: "home", to: "profile", description: "点击我的", action: { type: "tap", locator: { resource_id: "tab_profile", text: "我的" } } },
+                    { from: "home", to: "detail", description: "点击内容", action: { type: "tap", locator: { text: "推荐内容", bounds_hint: [50, 400, 1030, 600] } } },
+                    { from: "profile", to: "settings", description: "点击设置", action: { type: "tap", locator: { resource_id: "btn_settings", content_desc: "设置" } } },
+                    { from: "profile", to: "home", description: "点击首页", action: { type: "tap", locator: { resource_id: "tab_home", text: "首页" } } },
+                    { from: "search", to: "home", description: "点击首页", action: { type: "tap", locator: { resource_id: "tab_home", text: "首页" } } },
+                    { from: "search", to: "detail", description: "点击搜索结果", action: { type: "tap", locator: { text: "搜索结果项", parent_rid: "search_list" } } },
+                    { from: "settings", to: "profile", description: "点击返回", action: { type: "tap", locator: { content_desc: "返回" } } }
                 ],
                 popups: [
                     {
@@ -730,6 +730,22 @@
             }
         }
 
+        // 格式化 locator 为可读字符串
+        function formatLocator(locator) {
+            if (!locator) return '';
+            const parts = [];
+            if (locator.resource_id) parts.push(`rid: ${locator.resource_id}`);
+            if (locator.text) parts.push(`text: "${locator.text}"`);
+            if (locator.content_desc) parts.push(`desc: "${locator.content_desc}"`);
+            if (locator['class']) parts.push(`class: ${locator['class']}`);
+            if (locator.parent_rid) parts.push(`parent: ${locator.parent_rid}`);
+            if (locator.bounds_hint) {
+                const b = locator.bounds_hint;
+                parts.push(`bounds: [${b.join(',')}]`);
+            }
+            return parts.join(' | ');
+        }
+
         // 渲染跳转列表
         function renderTransitionList(transitions) {
             const container = document.getElementById('transition-list');
@@ -738,11 +754,14 @@
             for (const trans of transitions) {
                 const item = document.createElement('div');
                 item.className = 'transition-item';
+                const locator = trans.action ? trans.action.locator : null;
+                const locatorStr = formatLocator(locator);
                 item.innerHTML = `
                     <span style="color: #00d4ff;">${trans.from}</span>
                     <span class="transition-arrow">→</span>
                     <span style="color: #7b68ee;">${trans.to}</span>
                     <div class="transition-action">${trans.description || ''}</div>
+                    ${locatorStr ? `<div class="locator-info">${locatorStr}</div>` : ''}
                 `;
                 item.onclick = () => {
                     if (network) {
@@ -857,14 +876,19 @@
                 });
             }
 
-            // 边 - 不显示标签
+            // 边 - 显示描述标签，tooltip 显示 locator
             const edges = [];
             for (let i = 0; i < transitions.length; i++) {
                 const trans = transitions[i];
+                const locator = trans.action ? trans.action.locator : null;
+                const locatorStr = formatLocator(locator);
+                const desc = trans.description || '';
                 edges.push({
                     id: `e${i}`,
                     from: trans.from,
-                    to: trans.to
+                    to: trans.to,
+                    label: desc,
+                    title: locatorStr ? `${desc}\n${locatorStr}` : desc
                 });
             }
 
@@ -884,6 +908,7 @@
                 edges: {
                     arrows: 'to',
                     color: { color: '#666', highlight: '#00d4ff' },
+                    font: { color: '#aaa', size: 10, strokeWidth: 0, align: 'top' },
                     smooth: false,
                     width: 1
                 },
@@ -955,13 +980,40 @@
                 featuresContainer.innerHTML = '<span style="color: #666;">无</span>';
             }
 
-            // 出边入边
+            // 出边入边（含 locator）
             const transitions = mapData.transitions || [];
-            const outgoing = transitions.filter(t => t.from === pageId).map(t => t.to);
-            const incoming = transitions.filter(t => t.to === pageId).map(t => t.from);
+            const outgoing = transitions.filter(t => t.from === pageId);
+            const incoming = transitions.filter(t => t.to === pageId);
 
-            document.getElementById('detail-outgoing').textContent = outgoing.length > 0 ? outgoing.join(', ') : '无';
-            document.getElementById('detail-incoming').textContent = incoming.length > 0 ? incoming.join(', ') : '无';
+            const outEl = document.getElementById('detail-outgoing');
+            if (outgoing.length > 0) {
+                outEl.innerHTML = outgoing.map(t => {
+                    const loc = t.action ? t.action.locator : null;
+                    const locStr = formatLocator(loc);
+                    return `<div style="margin-bottom:6px;">
+                        <span style="color:#7b68ee;">${t.to}</span>
+                        <span style="color:#666;font-size:10px;margin-left:4px;">${t.description || ''}</span>
+                        ${locStr ? `<div class="locator-info" style="margin-top:3px;">${locStr}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } else {
+                outEl.textContent = '无';
+            }
+
+            const inEl = document.getElementById('detail-incoming');
+            if (incoming.length > 0) {
+                inEl.innerHTML = incoming.map(t => {
+                    const loc = t.action ? t.action.locator : null;
+                    const locStr = formatLocator(loc);
+                    return `<div style="margin-bottom:6px;">
+                        <span style="color:#00d4ff;">${t.from}</span>
+                        <span style="color:#666;font-size:10px;margin-left:4px;">${t.description || ''}</span>
+                        ${locStr ? `<div class="locator-info" style="margin-top:3px;">${locStr}</div>` : ''}
+                    </div>`;
+                }).join('');
+            } else {
+                inEl.textContent = '无';
+            }
         }
 
         function hideDetail() {

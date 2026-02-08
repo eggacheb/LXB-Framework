@@ -71,13 +71,14 @@ class NodeLocator:
             d["text"] = self.text
         if self.content_desc:
             d["content_desc"] = self.content_desc
+        if self.class_name:
+            d["class"] = self.class_name.split(".")[-1]  # 只保留短名
         if self.parent_resource_id:
             prid = self.parent_resource_id.split("/")[-1] if "/" in self.parent_resource_id else self.parent_resource_id
             d["parent_rid"] = prid
         # bounds 作为 hint 预留（用于自学习，不用于定位）
         if self.bounds and len(self.bounds) >= 4:
             d["bounds_hint"] = list(self.bounds)
-        # class_name 不保存到 map
         return d
 
     def unique_key(self) -> str:
@@ -157,7 +158,7 @@ class NodeLocator:
             resource_id=d.get("resource_id"),
             text=d.get("text"),
             content_desc=d.get("content_desc"),
-            class_name=d.get("class_name"),
+            class_name=d.get("class") or d.get("class_name"),
             parent_resource_id=d.get("parent_rid"),
             bounds=bounds
         )
@@ -383,6 +384,7 @@ class PendingVLMTask:
     node_name: str = ""             # 节点名称
     node_type: str = ""             # 节点类型
     expected_target: str = ""       # 预期目标页面
+    locator: Optional[NodeLocator] = None  # 触发节点的定位器
     future: Optional[object] = None
 
 
@@ -1723,7 +1725,8 @@ NAV|540|80|搜索|jump|search
     def _submit_vlm_task(self, node_key: str, screenshot: bytes, xml_nodes: List[Dict],
                          path: List[NodeLocator], depth: int,
                          from_page: str = "", node_name: str = "",
-                         node_type: str = "", expected_target: str = ""):
+                         node_type: str = "", expected_target: str = "",
+                         locator: NodeLocator = None):
         """提交 VLM 推理任务到后台"""
         if self._vlm_executor is None:
             return
@@ -1754,6 +1757,7 @@ NAV|540|80|搜索|jump|search
             node_name=node_name,
             node_type=node_type,
             expected_target=expected_target,
+            locator=locator,
             future=future
         )
 
@@ -1805,7 +1809,7 @@ NAV|540|80|搜索|jump|search
                     to_page=target_page_id,
                     node_name=task.node_name,
                     node_type=task.node_type,
-                    locator=NodeLocator()  # 需要从 task 恢复
+                    locator=task.locator or NodeLocator()
                 )
                 self.nav_map.add_transition(trans)
 
@@ -2161,7 +2165,8 @@ NAV|540|80|搜索|jump|search
                     self._submit_vlm_task(
                         node_key, new_screenshot, new_xml, new_path, task.depth,
                         from_page=task.from_page, node_name=task.name,
-                        node_type=task.node_type, expected_target=task.target_page
+                        node_type=task.node_type, expected_target=task.target_page,
+                        locator=task.locator
                     )
                     self.log("info", f"  VLM 分析已提交后台")
 
