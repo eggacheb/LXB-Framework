@@ -99,6 +99,17 @@ class HeuristicPlanner:
         return RoutePlan(route_map.package, home)
 
 
+class FixedPlanPlanner:
+    """Always return a fixed package + target page plan."""
+
+    def __init__(self, package_name: str, target_page: str):
+        self.package_name = package_name
+        self.target_page = target_page
+
+    def plan(self, user_task: str, route_map: RouteMap) -> RoutePlan:
+        return RoutePlan(self.package_name or route_map.package, self.target_page)
+
+
 class MapPromptPlanner:
     """
     Planner adapter: map + task -> LLM JSON -> RoutePlan.

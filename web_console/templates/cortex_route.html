@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -7,158 +7,91 @@
     <style>
         * { box-sizing: border-box; }
         body { margin: 0; font-family: "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
-        .wrap { width: 100%; margin: 0; padding: 12px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
-        .header { display: none; }
-        .top-nav { display: flex; gap: 8px; }
-        .top-nav a {
-            color: #cbd5e1;
-            text-decoration: none;
-            font-size: 12px;
-            padding: 6px 10px;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            background: #111827;
-            transition: all 0.2s;
-        }
-        .top-nav a:hover { border-color: #475569; color: #e2e8f0; }
-        .top-nav a.active { color: #93c5fd; border-color: #3b82f6; background: #172554; }
-        .grid { display: grid; grid-template-columns: 360px 1fr; gap: 12px; }
-        .card { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; }
-        .card h3 { margin: 0 0 10px; font-size: 15px; color: #93c5fd; }
+        .layout { display: grid; grid-template-columns: 380px 1fr; gap: 12px; height: 100vh; padding: 12px; }
+        .left { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; overflow: auto; }
+        .right { background: #0b1220; border: 1px solid #334155; border-radius: 10px; display: flex; flex-direction: column; min-height: 0; }
+        h3 { margin: 0 0 10px; font-size: 14px; color: #93c5fd; }
         .group { margin-bottom: 10px; }
         label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
-        input, select, textarea { width: 100%; background: #0b1220; border: 1px solid #334155; color: #e2e8f0; border-radius: 8px; padding: 8px; }
-        textarea { min-height: 78px; resize: vertical; }
+        input, select, textarea { width: 100%; background: #020617; border: 1px solid #334155; color: #e2e8f0; border-radius: 8px; padding: 8px; }
+        textarea { min-height: 96px; resize: vertical; }
         .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
         button { border: none; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
         .btn-primary { background: #2563eb; color: #fff; }
-        .btn-secondary { background: #334155; color: #e2e8f0; }
         .btn-ok { background: #059669; color: #fff; }
-        .status { padding: 7px 8px; border-radius: 8px; background: #1e293b; font-size: 12px; margin-bottom: 10px; }
-        .mono { font-family: Consolas, monospace; white-space: pre-wrap; font-size: 12px; background: #020617; border: 1px solid #334155; border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto; }
-        .log { max-height: 380px; overflow: auto; }
-        .log-item { font-family: Consolas, monospace; font-size: 12px; border-bottom: 1px solid #1e293b; padding: 4px 0; }
-        .device-conn-card { display: none; }
+        .btn-secondary { background: #334155; color: #e2e8f0; }
+        .feed-head { padding: 10px 12px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; }
+        .feed-body { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+        .msg { border: 1px solid #334155; border-radius: 8px; padding: 8px; }
+        .msg.user { background: #10223f; border-color: #1d4ed8; }
+        .msg.sys { background: #15212b; border-color: #334155; }
+        .msg.llm { background: #1a2230; border-color: #475569; }
+        .meta { font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
+        .content { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; line-height: 1.45; }
+        .status { font-size: 12px; color: #94a3b8; }
     </style>
 </head>
 <body>
-<div class="wrap">
-    <div class="header">
-        <h2 style="margin:0;">Cortex Route 调试台</h2>
-        <div class="top-nav">
-            <a href="/map_builder">Map Builder</a>
-            <a href="/map_viewer">Map Viewer</a>
-            <a href="/cortex_route" class="active">Cortex Route</a>
+<div class="layout">
+    <div class="left">
+        <h3>Cortex FSM</h3>
+        <div class="group">
+            <label>用户意图</label>
+            <textarea id="userTask" placeholder="例如：打开贴吧消息页，查看最新互动"></textarea>
+        </div>
+        <div class="group">
+            <label>Map 文件</label>
+            <select id="mapSelect"></select>
+        </div>
+        <div class="group">
+            <label>Package 过滤（可空）</label>
+            <input id="pkgFilter" placeholder="com.baidu.tieba">
+        </div>
+        <div class="row">
+            <div class="group">
+                <label>Node Retries</label>
+                <input id="nodeRetries" type="number" value="3">
+            </div>
+            <div class="group">
+                <label>Node Interval(s)</label>
+                <input id="nodeInterval" type="number" step="0.1" value="0.6">
+            </div>
+        </div>
+        <h3 style="margin-top:14px;">LLM 配置</h3>
+        <div class="group">
+            <label>API Base URL</label>
+            <input id="llmApiUrl" placeholder="https://api.xxx.com/v1">
+        </div>
+        <div class="group">
+            <label>API Key</label>
+            <input id="llmApiKey" type="password" placeholder="sk-...">
+        </div>
+        <div class="row">
+            <div class="group">
+                <label>Model</label>
+                <input id="llmModel" value="qwen-plus">
+            </div>
+            <div class="group">
+                <label>Timeout(s)</label>
+                <input id="llmTimeout" type="number" value="60">
+            </div>
+        </div>
+        <div class="btns">
+            <button class="btn-secondary" onclick="loadMaps()">刷新 Map</button>
+            <button class="btn-secondary" onclick="saveLlmConfig()">保存 LLM</button>
+            <button class="btn-primary" onclick="runFsm()">运行 FSM</button>
+            <button class="btn-ok" onclick="clearFeed()">清空交互</button>
         </div>
     </div>
-
-    <div class="grid">
-        <div>
-            <div class="card device-conn-card">
-                <h3>设备连接</h3>
-                <div id="connStatus" class="status">未检查</div>
-                <div class="row">
-                    <div class="group">
-                        <label>Host</label>
-                        <input id="host" value="192.168.1.100">
-                    </div>
-                    <div class="group">
-                        <label>Port</label>
-                        <input id="port" type="number" value="12345">
-                    </div>
-                </div>
-                <div class="btns">
-                    <button class="btn-primary" onclick="connectDevice()">连接</button>
-                    <button class="btn-secondary" onclick="disconnectDevice()">断开</button>
-                    <button class="btn-secondary" onclick="refreshStatus()">刷新状态</button>
-                </div>
-            </div>
-
-            <div class="card">
-                <h3>LLM 配置（Planner）</h3>
-                <div class="group">
-                    <label>API Base URL</label>
-                    <input id="llmApiUrl" placeholder="https://api.xxx.com/v1">
-                </div>
-                <div class="group">
-                    <label>API Key</label>
-                    <input id="llmApiKey" type="password" placeholder="sk-...">
-                </div>
-                <div class="group">
-                    <label>Model</label>
-                    <input id="llmModel" value="qwen-plus">
-                </div>
-                <div class="row">
-                    <div class="group">
-                        <label>Temperature</label>
-                        <input id="llmTemp" type="number" step="0.1" value="0.1">
-                    </div>
-                    <div class="group">
-                        <label>Timeout(s)</label>
-                        <input id="llmTimeout" type="number" value="30">
-                    </div>
-                </div>
-                <div class="btns">
-                    <button class="btn-ok" onclick="saveLlmConfig()">保存配置</button>
-                    <button class="btn-secondary" onclick="testLlmConfig()">测试 LLM</button>
-                </div>
-                <div id="llmTestResult" class="mono" style="margin-top:8px; min-height:72px;"></div>
-            </div>
+    <div class="right">
+        <div class="feed-head">
+            <div style="font-weight:600;">交互信息流</div>
+            <div id="runStatus" class="status">空闲</div>
         </div>
-
-        <div>
-            <div class="card">
-                <h3>路由执行</h3>
-                <div class="group">
-                    <label>用户意图</label>
-                    <textarea id="userTask" placeholder="例如：打开贴吧的消息页面"></textarea>
-                </div>
-                <div class="row">
-                    <div class="group">
-                        <label>Map 文件</label>
-                        <select id="mapSelect"></select>
-                    </div>
-                    <div class="group">
-                        <label>Package 过滤（可空）</label>
-                        <input id="pkgFilter" placeholder="com.baidu.tieba">
-                    </div>
-                </div>
-                <div class="row">
-                    <div class="group">
-                        <label>Node Exists Retries</label>
-                        <input id="nodeRetries" type="number" value="3">
-                    </div>
-                    <div class="group">
-                        <label>Node Exists Interval(s)</label>
-                        <input id="nodeInterval" type="number" step="0.1" value="0.6">
-                    </div>
-                </div>
-                <div class="btns">
-                    <button class="btn-secondary" onclick="loadMaps()">刷新 Map 列表</button>
-                    <button class="btn-primary" onclick="runRoute()">运行路由</button>
-                </div>
-            </div>
-
-            <div class="card">
-                <h3>Planner 输出</h3>
-                <div id="plannerOut" class="mono">-</div>
-            </div>
-
-            <div class="card">
-                <h3>BFS 点击链</h3>
-                <div id="routeSteps" class="mono">-</div>
-            </div>
-
-            <div class="card">
-                <h3>执行日志</h3>
-                <div id="routeLogs" class="log"></div>
-            </div>
-        </div>
+        <div id="feed" class="feed-body"></div>
     </div>
 </div>
-
 <script>
 async function jfetch(url, method='GET', body=null) {
     const opt = { method, headers: { 'Content-Type': 'application/json' } };
@@ -166,36 +99,17 @@ async function jfetch(url, method='GET', body=null) {
     const r = await fetch(url, opt);
     return await r.json();
 }
-
-function logLine(msg) {
-    const el = document.getElementById('routeLogs');
+function feedPush(kind, title, content) {
+    const feed = document.getElementById('feed');
     const item = document.createElement('div');
-    item.className = 'log-item';
-    item.textContent = msg;
-    el.appendChild(item);
-    el.scrollTop = el.scrollHeight;
+    item.className = `msg ${kind}`;
+    const ts = new Date().toLocaleTimeString();
+    item.innerHTML = `<div class="meta">${ts} | ${title}</div><div class="content"></div>`;
+    item.querySelector('.content').textContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    feed.appendChild(item);
+    feed.scrollTop = feed.scrollHeight;
 }
-
-async function refreshStatus() {
-    const data = await jfetch('/api/status');
-    const s = document.getElementById('connStatus');
-    s.textContent = data.connected ? `已连接 ${data.host}:${data.port}` : '未连接';
-}
-
-async function connectDevice() {
-    const host = document.getElementById('host').value.trim();
-    const port = Number(document.getElementById('port').value || '12345');
-    const data = await jfetch('/api/connect', 'POST', { host, port });
-    logLine(`[connect] ${data.message || (data.success ? 'ok' : 'failed')}`);
-    await refreshStatus();
-}
-
-async function disconnectDevice() {
-    const data = await jfetch('/api/disconnect', 'POST', {});
-    logLine(`[disconnect] ${data.message || (data.success ? 'ok' : 'failed')}`);
-    await refreshStatus();
-}
-
+function clearFeed() { document.getElementById('feed').innerHTML = ''; }
 async function loadLlmConfig() {
     const data = await jfetch('/api/cortex/llm/config');
     if (!data.success) return;
@@ -203,32 +117,19 @@ async function loadLlmConfig() {
     document.getElementById('llmApiUrl').value = c.api_base_url || '';
     document.getElementById('llmApiKey').value = c.api_key || '';
     document.getElementById('llmModel').value = c.model_name || 'qwen-plus';
-    document.getElementById('llmTemp').value = c.temperature ?? 0.1;
-    document.getElementById('llmTimeout').value = c.timeout ?? 30;
+    document.getElementById('llmTimeout').value = c.timeout ?? 60;
 }
-
 async function saveLlmConfig() {
     const payload = {
         api_base_url: document.getElementById('llmApiUrl').value.trim(),
         api_key: document.getElementById('llmApiKey').value.trim(),
         model_name: document.getElementById('llmModel').value.trim(),
-        temperature: Number(document.getElementById('llmTemp').value || '0.1'),
-        timeout: Number(document.getElementById('llmTimeout').value || '30')
+        temperature: 0.1,
+        timeout: Number(document.getElementById('llmTimeout').value || '60')
     };
     const data = await jfetch('/api/cortex/llm/config', 'POST', payload);
-    logLine(`[llm/save] ${data.message || (data.success ? 'ok' : 'failed')}`);
+    feedPush('sys', 'llm/config', data.message || (data.success ? 'ok' : 'failed'));
 }
-
-async function testLlmConfig() {
-    const out = document.getElementById('llmTestResult');
-    out.textContent = 'Testing...';
-    const data = await jfetch('/api/cortex/llm/test', 'POST', {
-        prompt: '用户要打开贴吧消息页。只输出JSON: {"package_name":"...","target_page":"..."}'
-    });
-    out.textContent = data.success ? (data.response || '') : (data.message || 'failed');
-    logLine(`[llm/test] ${data.message || (data.success ? 'ok' : 'failed')}`);
-}
-
 async function loadMaps() {
     const packageName = document.getElementById('pkgFilter').value.trim();
     const data = await jfetch('/api/maps/list');
@@ -238,18 +139,9 @@ async function loadMaps() {
     autoOpt.value = '';
     autoOpt.textContent = '自动按应用选择最新 map';
     sel.appendChild(autoOpt);
-    if (!data.success) {
-        autoOpt.textContent = '加载失败（将走自动模式）';
-        return;
-    }
+    if (!data.success) return;
     let maps = data.data || [];
-    if (packageName) {
-        maps = maps.filter(m => m.package === packageName);
-    }
-    if (!maps.length) {
-        autoOpt.textContent = '无可用 map（将走自动模式）';
-        return;
-    }
+    if (packageName) maps = maps.filter(m => m.package === packageName);
     for (const m of maps) {
         const opt = document.createElement('option');
         opt.value = m.filepath;
@@ -258,17 +150,33 @@ async function loadMaps() {
     }
     sel.value = '';
 }
-
-async function runRoute() {
-    const task = document.getElementById('userTask').value.trim();
-    if (!task) {
-        alert('请先输入用户意图');
-        return;
+async function pollTask(taskId) {
+    let cursor = 0;
+    while (true) {
+        const p = await jfetch(`/api/cortex/task/${taskId}/poll?cursor=${cursor}`);
+        if (!p.success) { feedPush('sys', 'task/poll', p.message || 'poll_failed'); return; }
+        cursor = p.next_cursor || cursor;
+        for (const ev of (p.events || [])) {
+            const stage = ev.stage || 'fsm';
+            const event = ev.event || 'event';
+            if (stage === 'llm' && event === 'prompt') { feedPush('user', `LLM Prompt (${ev.state || ''})`, ev.prompt || ''); continue; }
+            if (stage === 'llm' && event === 'response') { feedPush('llm', `LLM Response (${ev.state || ''})`, ev.response || ''); continue; }
+            feedPush('sys', `${stage}/${event}`, ev);
+        }
+        if (p.done) {
+            const r = p.result || {};
+            feedPush(p.task_success ? 'sys' : 'llm', 'FSM Result', r);
+            document.getElementById('runStatus').textContent = p.task_success ? '完成' : `失败: ${p.message || 'unknown'}`;
+            return;
+        }
+        await new Promise(res => setTimeout(res, 400));
     }
-    document.getElementById('routeLogs').innerHTML = '';
-    document.getElementById('plannerOut').textContent = '-';
-    document.getElementById('routeSteps').textContent = '-';
-
+}
+async function runFsm() {
+    const task = document.getElementById('userTask').value.trim();
+    if (!task) { alert('请先输入用户意图'); return; }
+    document.getElementById('runStatus').textContent = '运行中...';
+    feedPush('user', 'User Intent', task);
     const payload = {
         user_task: task,
         map_filepath: document.getElementById('mapSelect').value || '',
@@ -280,35 +188,21 @@ async function runRoute() {
             route_recovery_enabled: false,
             max_route_restarts: 0,
             use_vlm_takeover: false
+        },
+        fsm_config: {
+            max_turns: 40,
+            max_commands_per_turn: 1,
+            max_vision_turns: 20,
+            action_interval_sec: 0.8,
+            screenshot_settle_sec: 0.6
         }
     };
-
-    const data = await jfetch('/api/cortex/route/run', 'POST', payload);
-
-    if (!data.success) {
-        logLine(`[route] failed: ${data.message || 'unknown'}`);
-        if (data.traceback) logLine(data.traceback);
-        return;
-    }
-
-    document.getElementById('plannerOut').textContent = JSON.stringify({
-        app_resolution: data.app_resolution || {},
-        llm_rounds: data.llm_rounds || {},
-        planner_output: data.planner_output || {}
-    }, null, 2);
-    document.getElementById('routeSteps').textContent = JSON.stringify(data.route_steps || [], null, 2);
-
-    (data.logs || []).forEach(x => {
-        logLine(`${x.ts || ''} [${x.stage}/${x.event}] ${x.result || ''} ${JSON.stringify(x)}`);
-    });
-    logLine(`[route] done status=${(data.result || {}).status}`);
+    const start = await jfetch('/api/cortex/fsm/start', 'POST', payload);
+    if (!start.success) { feedPush('sys', 'FSM Start Failed', start.message || 'unknown'); return; }
+    feedPush('sys', 'FSM Task', `task_id=${start.task_id}`);
+    await pollTask(start.task_id);
 }
-
-(async function init() {
-    await refreshStatus();
-    await loadLlmConfig();
-    await loadMaps();
-})();
+(async function init(){ await loadLlmConfig(); await loadMaps(); })();
 </script>
 </body>
 </html>

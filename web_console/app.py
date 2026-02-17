@@ -9,6 +9,9 @@ import sys
 import os
 import base64
 import json
+import threading
+import uuid
+from datetime import datetime, timezone
 
 # 尝试加载 python-dotenv (如果存在)
 try:
@@ -48,6 +51,9 @@ connection_info = {
     'port': None
 }
 
+TASKS = {}
+TASKS_LOCK = threading.Lock()
+
 CORTEX_LLM_CONFIG_FILE = os.path.abspath(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), '.cortex_llm_planner.json')
 )
@@ -85,6 +91,40 @@ def _save_cortex_llm_config(config: dict) -> None:
         json.dump(current, f, ensure_ascii=False, indent=2)
 
 
+def _task_create(task_type: str) -> str:
+    task_id = str(uuid.uuid4())
+    with TASKS_LOCK:
+        TASKS[task_id] = {
+            'task_id': task_id,
+            'type': task_type,
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'events': [],
+            'done': False,
+            'success': False,
+            'result': None,
+            'message': '',
+        }
+    return task_id
+
+
+def _task_append(task_id: str, event: dict) -> None:
+    with TASKS_LOCK:
+        t = TASKS.get(task_id)
+        if t:
+            t['events'].append(event)
+
+
+def _task_finish(task_id: str, success: bool, result: dict = None, message: str = '') -> None:
+    with TASKS_LOCK:
+        t = TASKS.get(task_id)
+        if not t:
+            return
+        t['done'] = True
+        t['success'] = bool(success)
+        t['result'] = result or {}
+        t['message'] = message or ''
+
+
 def _build_llm_complete(config: dict):
     from openai import OpenAI
 
@@ -119,6 +159,87 @@ def _build_llm_complete(config: dict):
         return (response.choices[0].message.content or '').strip()
 
     return complete
+
+
+def _build_llm_complete_fsm(config: dict):
+    from openai import OpenAI
+
+    api_base_url = (config.get('api_base_url') or '').strip()
+    api_key = (config.get('api_key') or '').strip()
+    model_name = (config.get('model_name') or '').strip()
+    if not api_base_url or not api_key or not model_name:
+        raise ValueError('LLM 配置不完整：api_base_url / api_key / model_name 必填')
+
+    client = OpenAI(
+        base_url=api_base_url,
+        api_key=api_key,
+        timeout=float(config.get('timeout', 30)),
+    )
+    temperature = float(config.get('temperature', 0.1))
+
+    def complete(prompt: str) -> str:
+        response = client.chat.completions.create(
+            model=model_name,
+            temperature=temperature,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a finite-state mobile planner. "
+                        "Output ONLY DSL instruction lines. "
+                        "Do not output JSON, markdown, or explanations."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return (response.choices[0].message.content or '').strip()
+
+    return complete
+
+
+def _build_llm_complete_with_image(config: dict):
+    from openai import OpenAI
+
+    api_base_url = (config.get('api_base_url') or '').strip()
+    api_key = (config.get('api_key') or '').strip()
+    model_name = (config.get('model_name') or '').strip()
+    if not api_base_url or not api_key or not model_name:
+        raise ValueError('LLM 配置不完整：api_base_url / api_key / model_name 必填')
+
+    client = OpenAI(
+        base_url=api_base_url,
+        api_key=api_key,
+        timeout=float(config.get('timeout', 30)),
+    )
+    temperature = float(config.get('temperature', 0.1))
+
+    def complete_with_image(prompt: str, image_bytes: bytes) -> str:
+        image_b64 = base64.b64encode(image_bytes).decode('ascii')
+        response = client.chat.completions.create(
+            model=model_name,
+            temperature=temperature,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a mobile VLM planner. "
+                        "Output ONLY DSL instruction lines (one per line). "
+                        "Do not output JSON, markdown, or explanations."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                    ],
+                },
+            ],
+        )
+        return (response.choices[0].message.content or '').strip()
+
+    return complete_with_image
 
 
 def _extract_json_object(text: str) -> dict:
@@ -260,6 +381,29 @@ def _select_target_page_by_llm(
     return {'target_page': target_page, 'reason': reason, 'raw': raw}
 
 
+def _build_page_candidates_from_map(map_path: str) -> list:
+    try:
+        with open(map_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+    except Exception:
+        return []
+
+    rows = []
+    pages = raw.get('pages', {}) if isinstance(raw, dict) else {}
+    for page_id, page in pages.items():
+        if not isinstance(page, dict):
+            continue
+        rows.append({
+            'page_id': str(page_id),
+            'legacy_page_id': str(page.get('legacy_page_id') or ''),
+            'name': str(page.get('name') or ''),
+            'description': str(page.get('description') or ''),
+            'features': list(page.get('features') or [])[:8],
+            'aliases': list(page.get('target_aliases') or [])[:6],
+        })
+    return rows
+
+
 class _FixedPlanPlanner:
     def __init__(self, package_name: str, target_page: str):
         self.package_name = package_name
@@ -269,6 +413,36 @@ class _FixedPlanPlanner:
         from src.cortex import RoutePlan
         pkg = self.package_name or route_map.package
         return RoutePlan(pkg, self.target_page)
+
+
+class _FSMPlannerBridge:
+    """
+    Bridge planner for FSM mode.
+    - APP_RESOLVE is pinned to selected package when available.
+    - Other states delegate to FSM LLM planner when provided.
+    - Without LLM planner, VISION_ACT defaults to DONE for route-only debugging.
+    """
+
+    def __init__(self, selected_package: str = "", llm_planner=None):
+        self.selected_package = (selected_package or "").strip()
+        self.llm_planner = llm_planner
+
+    def plan(self, state, prompt, context):
+        state_name = getattr(state, "value", str(state))
+        if state_name == "APP_RESOLVE" and self.selected_package:
+            return f"SET_APP {self.selected_package}"
+
+        if self.llm_planner is not None:
+            return self.llm_planner.plan(state, prompt, context)
+
+        if state_name == "VISION_ACT":
+            return "DONE"
+        return "FAIL llm_planner_disabled"
+
+    def plan_vision(self, state, prompt, context, screenshot):
+        if self.llm_planner is not None and hasattr(self.llm_planner, 'plan_vision'):
+            return self.llm_planner.plan_vision(state, prompt, context, screenshot)
+        return self.plan(state, prompt, context)
 
 
 @app.route('/')
@@ -2105,6 +2279,210 @@ def cortex_route_then_act_run():
             'message': str(e),
             'traceback': traceback.format_exc()
         }), 500
+
+
+def _run_cortex_fsm_logic(data: dict, log_callback):
+    global client
+    from src.cortex import CortexFSMEngine, FSMConfig, LLMPlanner, RouteConfig
+
+    user_task = (data.get('user_task') or '').strip()
+    if not user_task:
+        raise ValueError('user_task is required')
+
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'maps'))
+    map_path = (data.get('map_filepath') or '').strip()
+    manual_package = (data.get('package_name') or '').strip()
+    use_llm_planner = bool(data.get('use_llm_planner', True))
+
+    planner_cfg = _load_cortex_llm_config()
+    llm_complete_json = _build_llm_complete(planner_cfg) if use_llm_planner else None
+    llm_complete_fsm = _build_llm_complete_fsm(planner_cfg) if use_llm_planner else None
+    llm_complete_with_image = _build_llm_complete_with_image(planner_cfg) if use_llm_planner else None
+
+    app_resolution = {
+        'mode': 'manual' if manual_package else 'auto',
+        'selected_package': manual_package or None,
+        'reason': '',
+        'candidate_count': 0,
+    }
+    round1_app = {}
+
+    app_candidates_for_fsm = []
+    installed_apps = []
+    try:
+        installed_apps = _normalize_installed_apps(client.list_apps('user'))
+    except Exception:
+        installed_apps = []
+
+    if not map_path:
+        selected_package = manual_package
+        if not selected_package:
+            map_ready_apps = [a for a in installed_apps if _has_map_for_package(base_dir, a.get('package', ''))]
+            app_candidates_for_fsm = installed_apps[:] if installed_apps else map_ready_apps[:]
+            app_resolution['candidate_count'] = len(map_ready_apps)
+            if not map_ready_apps:
+                raise RuntimeError('no installed app with local map found')
+
+            if llm_complete_json:
+                try:
+                    picked = _select_package_by_llm(llm_complete_json, user_task, installed_apps or map_ready_apps)
+                    picked_pkg = picked.get('package_name') or ''
+                    round1_app = picked
+                    exists = any(a.get('package') == picked_pkg for a in (installed_apps or map_ready_apps))
+                except Exception as e:
+                    picked = {}
+                    picked_pkg = ''
+                    exists = False
+                    round1_app = {'error': f'llm_timeout_or_error: {e}'}
+                if exists:
+                    selected_package = picked_pkg
+                    app_resolution['mode'] = 'llm'
+                    app_resolution['selected_package'] = picked_pkg
+                    app_resolution['reason'] = picked.get('reason', '')
+                    if not _has_map_for_package(base_dir, selected_package):
+                        selected_package = map_ready_apps[0].get('package')
+                        app_resolution['mode'] = 'llm_no_map_fallback'
+                        app_resolution['selected_package'] = selected_package
+                        app_resolution['reason'] = 'llm selected app has no map, fallback to first map-ready app'
+                else:
+                    selected_package = map_ready_apps[0].get('package')
+                    app_resolution['mode'] = 'fallback_first_candidate'
+                    app_resolution['selected_package'] = selected_package
+                    app_resolution['reason'] = 'llm timeout/invalid package, fallback to first candidate'
+            else:
+                selected_package = map_ready_apps[0].get('package')
+                app_resolution['mode'] = 'fallback_no_llm'
+                app_resolution['selected_package'] = selected_package
+                app_resolution['reason'] = 'llm planner disabled'
+        else:
+            app_candidates_for_fsm = [{'package': selected_package, 'name': _infer_app_name_from_package(selected_package)}]
+
+        map_path = _pick_latest_map_file(base_dir, selected_package or None)
+        if not map_path:
+            raise RuntimeError(f'no map file found for package: {selected_package}')
+    else:
+        map_path = os.path.abspath(map_path)
+        if not map_path.startswith(base_dir):
+            raise RuntimeError('invalid map_filepath')
+        if not os.path.exists(map_path):
+            raise RuntimeError('map_filepath not found')
+        if manual_package:
+            app_candidates_for_fsm = [{'package': manual_package, 'name': _infer_app_name_from_package(manual_package)}]
+        else:
+            app_candidates_for_fsm = []
+
+    cfg = data.get('route_config') or {}
+    route_cfg = RouteConfig(
+        node_exists_retries=int(cfg.get('node_exists_retries', 3)),
+        node_exists_interval_sec=float(cfg.get('node_exists_interval_sec', 0.6)),
+        max_route_restarts=int(cfg.get('max_route_restarts', 0)),
+        use_vlm_takeover=bool(cfg.get('use_vlm_takeover', False)),
+        vlm_takeover_timeout_sec=float(cfg.get('vlm_takeover_timeout_sec', 15.0)),
+        route_recovery_enabled=bool(cfg.get('route_recovery_enabled', False)),
+        locator_score_threshold=float(cfg.get('locator_score_threshold', 45.0)),
+        locator_ambiguity_delta=float(cfg.get('locator_ambiguity_delta', 8.0)),
+        hint_distance_limit_px=float(cfg.get('hint_distance_limit_px', 520.0)),
+    )
+    fsm_cfg_data = data.get('fsm_config') or {}
+    fsm_cfg = FSMConfig(
+        max_turns=int(fsm_cfg_data.get('max_turns', 30)),
+        max_commands_per_turn=int(fsm_cfg_data.get('max_commands_per_turn', 1)),
+        max_vision_turns=int(fsm_cfg_data.get('max_vision_turns', 20)),
+        action_interval_sec=float(fsm_cfg_data.get('action_interval_sec', 0.8)),
+        screenshot_settle_sec=float(fsm_cfg_data.get('screenshot_settle_sec', 0.6)),
+    )
+
+    llm_planner = LLMPlanner(llm_complete_fsm, llm_complete_with_image) if llm_complete_fsm else None
+    selected_package = app_resolution.get('selected_package') or ''
+    planner = _FSMPlannerBridge(selected_package=selected_package, llm_planner=llm_planner)
+
+    logs = []
+    def _log(payload):
+        logs.append(payload)
+        if log_callback:
+            log_callback(payload)
+
+    engine = CortexFSMEngine(
+        client=client,
+        planner=planner,
+        route_config=route_cfg,
+        fsm_config=fsm_cfg,
+        log_callback=_log,
+    )
+    result = engine.run(
+        user_task=user_task,
+        map_path=map_path,
+        start_page=(data.get('start_page') or None),
+        extra_context={
+            'app_candidates': (installed_apps or app_candidates_for_fsm),
+            'page_candidates': _build_page_candidates_from_map(map_path),
+        },
+    )
+    ok = result.get('status') == 'success'
+    return {
+        'success': ok,
+        'message': None if ok else (result.get('reason') or f"fsm_failed@{result.get('state', 'UNKNOWN')}"),
+        'map_path': map_path,
+        'app_resolution': app_resolution,
+        'llm_rounds': {'round1_app': round1_app},
+        'result': result,
+        'logs': logs,
+    }
+
+
+@app.route('/api/cortex/fsm/run', methods=['POST'])
+def cortex_fsm_run():
+    global client
+    if not client:
+        return jsonify({'success': False, 'message': 'device not connected'}), 400
+    try:
+        return jsonify(_run_cortex_fsm_logic(request.json or {}, log_callback=None))
+    except Exception as e:
+        import traceback
+        return jsonify({'success': False, 'message': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+@app.route('/api/cortex/fsm/start', methods=['POST'])
+def cortex_fsm_start():
+    global client
+    if not client:
+        return jsonify({'success': False, 'message': 'device not connected'}), 400
+
+    data = request.json or {}
+    task_id = _task_create('cortex_fsm')
+
+    def _runner():
+        try:
+            payload = _run_cortex_fsm_logic(data, log_callback=lambda e: _task_append(task_id, e))
+            _task_finish(task_id, bool(payload.get('success')), payload, payload.get('message') or '')
+        except Exception as e:
+            _task_finish(task_id, False, {'success': False, 'message': str(e)}, str(e))
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return jsonify({'success': True, 'task_id': task_id})
+
+
+@app.route('/api/cortex/task/<task_id>/poll', methods=['GET'])
+def cortex_task_poll(task_id):
+    cursor = int(request.args.get('cursor', '0'))
+    with TASKS_LOCK:
+        t = TASKS.get(task_id)
+        if not t:
+            return jsonify({'success': False, 'message': 'task_not_found'}), 404
+        events = t['events'][cursor:]
+        next_cursor = cursor + len(events)
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'events': events,
+            'next_cursor': next_cursor,
+            'done': bool(t['done']),
+            'task_success': bool(t['success']),
+            'result': t['result'] if t['done'] else None,
+            'message': t['message'] if t['done'] else '',
+        })
+
+
 def _pick_latest_map_file(base_dir: str, package_name: str = None) -> str:
     """Pick latest nav_map_*.json, optionally constrained by package."""
     import os
