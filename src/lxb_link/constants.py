@@ -1,4 +1,4 @@
-"""
+﻿"""
 LXB-Link Protocol Constants
 
 This module defines all constants used in the LXB-Link protocol including:
@@ -51,7 +51,7 @@ MAX_PAYLOAD_SIZE = 65535 - HEADER_SIZE - CRC_SIZE
 # - 0x00-0x0F: Link Layer (handshake, ACK, heartbeat, protocol control)
 # - 0x10-0x1F: Input Layer (tap, swipe, gestures, wake)
 # - 0x20-0x2F: Input Extension (text input, key events, paste)
-# - 0x30-0x3F: Sense Layer (activity, UI tree, node finding) ⭐ Core upgrade
+# - 0x30-0x3F: Sense Layer (activity, UI tree, node finding) 猸?Core upgrade
 # - 0x40-0x4F: Lifecycle (restart app, clipboard, app management)
 # - 0x50-0x5F: Debug Layer (device info, logcat, performance stats)
 # - 0x60-0x6F: Media Layer (screenshot, recording, audio capture)
@@ -79,9 +79,10 @@ CMD_LONG_PRESS = 0x12   # Long press (new)
 CMD_MULTI_TOUCH = 0x13  # Multi-point touch (new)
 CMD_GESTURE = 0x14      # Complex gesture (pinch/rotate) (new)
 CMD_WAKE = 0x1A         # Wake/unlock device (migrated from 0x0A)
-CMD_UNLOCK = 0x1B       # Slide to unlock (no password) ⭐
+CMD_UNLOCK = 0x1B       # Slide to unlock (no password)
 CMD_SET_TOUCH_MODE = 0x1C  # Touch mode: 0=uia first, 1=shell(input) first
-# 0x15-0x19, 0x1D-0x1F: Reserved
+CMD_SET_SCREENSHOT_QUALITY = 0x1D  # Screenshot JPEG quality: 1..100
+# 0x15-0x19, 0x1E-0x1F: Reserved
 
 # -----------------------------------------------------------------------------
 # Input Extension (0x20-0x2F) - Advanced Input
@@ -92,7 +93,7 @@ CMD_PASTE = 0x22        # Paste operation (new)
 # 0x23-0x2F: Reserved
 
 # -----------------------------------------------------------------------------
-# Sense Layer (0x30-0x3F) - Perception Capabilities ⭐ Core Upgrade
+# Sense Layer (0x30-0x3F) - Perception Capabilities 猸?Core Upgrade
 # -----------------------------------------------------------------------------
 CMD_GET_ACTIVITY = 0x30    # Get current Activity name (new)
 CMD_DUMP_HIERARCHY = 0x31  # Dump UI tree (binary+string pool) (new)
@@ -100,9 +101,9 @@ CMD_FIND_NODE = 0x32       # Find node with computation offloading (new)
 CMD_GET_FOCUSED = 0x33     # Get focused element (new)
 CMD_WAIT_FOR = 0x34        # Wait for element to appear (new)
 CMD_OCR_REGION = 0x35      # OCR on device (new)
-CMD_GET_SCREEN_STATE = 0x36  # Get screen state (off/on/locked) ⭐
-CMD_GET_SCREEN_SIZE = 0x37   # Get screen size and density ⭐
-CMD_FIND_NODE_COMPOUND = 0x39  # Compound multi-condition node find ⭐
+CMD_GET_SCREEN_STATE = 0x36  # Get screen state (off/on/locked)
+CMD_GET_SCREEN_SIZE = 0x37   # Get screen size and density
+CMD_FIND_NODE_COMPOUND = 0x39  # Compound multi-condition node find
 # 0x38, 0x3A-0x3F: Reserved for AI enhancements
 
 # -----------------------------------------------------------------------------
@@ -111,12 +112,12 @@ CMD_FIND_NODE_COMPOUND = 0x39  # Compound multi-condition node find ⭐
 CMD_RESTART_APP = 0x40     # Restart application (new)
 CMD_GET_CLIPBOARD = 0x41   # Get clipboard content (new)
 CMD_SET_CLIPBOARD = 0x42   # Set clipboard content (new)
-CMD_LAUNCH_APP = 0x43      # Launch application ⭐
-CMD_STOP_APP = 0x44        # Force stop application ⭐
+CMD_LAUNCH_APP = 0x43      # Launch application
+CMD_STOP_APP = 0x44        # Force stop application
 CMD_CLEAR_DATA = 0x45      # Clear app data (new)
 CMD_INSTALL_APK = 0x46     # Install application (new)
 CMD_UNINSTALL = 0x47       # Uninstall application (new)
-CMD_LIST_APPS = 0x48       # List installed applications ⭐
+CMD_LIST_APPS = 0x48       # List installed applications
 # 0x49-0x4F: Reserved
 
 # -----------------------------------------------------------------------------
@@ -203,6 +204,7 @@ CHANNEL_MAP = {
     CMD_UNLOCK: CH_CONTROL,
     CMD_WAKE: CH_CONTROL,
     CMD_SET_TOUCH_MODE: CH_CONTROL,
+    CMD_SET_SCREENSHOT_QUALITY: CH_CONTROL,
     CMD_LAUNCH_APP: CH_CONTROL,
     CMD_STOP_APP: CH_CONTROL,
     CMD_GET_SCREEN_STATE: CH_CONTROL,
@@ -333,21 +335,21 @@ PREDEFINED_CLASSES = [
 
 PREDEFINED_TEXTS = [
     "",                 # 0x40: Empty string (very common!)
-    "确定",             # 0x41: Confirm (Chinese)
-    "取消",             # 0x42: Cancel (Chinese)
-    "返回",             # 0x43: Back (Chinese)
-    "搜索",             # 0x44: Search (Chinese)
-    "设置",             # 0x45: Settings (Chinese)
-    "更多",             # 0x46: More (Chinese)
-    "完成",             # 0x47: Done (Chinese)
-    "提交",             # 0x48: Submit (Chinese)
-    "发送",             # 0x49: Send (Chinese)
-    "登录",             # 0x4A: Login (Chinese)
-    "注册",             # 0x4B: Register (Chinese)
-    "退出",             # 0x4C: Exit (Chinese)
-    "刷新",             # 0x4D: Refresh (Chinese)
-    "删除",             # 0x4E: Delete (Chinese)
-    "保存",             # 0x4F: Save (Chinese)
+    "纭畾",             # 0x41: Confirm (Chinese)
+    "鍙栨秷",             # 0x42: Cancel (Chinese)
+    "杩斿洖",             # 0x43: Back (Chinese)
+    "鎼滅储",             # 0x44: Search (Chinese)
+    "璁剧疆",             # 0x45: Settings (Chinese)
+    "鏇村",             # 0x46: More (Chinese)
+    "瀹屾垚",             # 0x47: Done (Chinese)
+    "鎻愪氦",             # 0x48: Submit (Chinese)
+    "鍙戦€?",             # 0x49: Send (Chinese)
+    "鐧诲綍",             # 0x4A: Login (Chinese)
+    "娉ㄥ唽",             # 0x4B: Register (Chinese)
+    "閫€鍑?",             # 0x4C: Exit (Chinese)
+    "鍒锋柊",             # 0x4D: Refresh (Chinese)
+    "鍒犻櫎",             # 0x4E: Delete (Chinese)
+    "淇濆瓨",             # 0x4F: Save (Chinese)
     "OK",               # 0x50: OK (English)
     "Cancel",           # 0x51: Cancel (English)
     "Back",             # 0x52: Back (English)
@@ -437,7 +439,7 @@ COMPOUND_FIELD_CLASS_NAME = 3       # getClassName()
 COMPOUND_FIELD_PARENT_RESOURCE_ID = 4  # parent's getViewIdResourceName()
 COMPOUND_FIELD_ACTIVITY = 5         # current Activity name
 COMPOUND_FIELD_CHILD_INDEX = 6      # index among parent's children
-COMPOUND_FIELD_CLICKABLE = 7        # "true"/"false" — node is clickable
+COMPOUND_FIELD_CLICKABLE = 7        # "true"/"false" 鈥?node is clickable
 COMPOUND_FIELD_CLICKABLE_INDEX = 8  # index among parent's clickable children
 
 # =============================================================================
@@ -554,3 +556,4 @@ class LXBChecksumError(LXBLinkError):
 
     def __init__(self, message: str = "CRC32 checksum mismatch"):
         super().__init__(message, ERR_INVALID_CRC)
+

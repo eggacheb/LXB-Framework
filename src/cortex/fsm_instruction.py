@@ -21,6 +21,7 @@ _ARG_COUNTS = {
     "SWIPE": (5, 5),
     "INPUT": (1, 1),
     "WAIT": (1, 1),
+    "BACK": (0, 0),
     "CHECK_POPUP": (0, 0),
     "ASSERT_PAGE": (1, 1),
     "RESTART_APP": (0, 0),

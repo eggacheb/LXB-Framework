@@ -97,6 +97,9 @@ public class CommandDispatcher {
                 case 0x1C:  // CMD_SET_TOUCH_MODE
                     response = executionEngine.handleSetTouchMode(payload);
                     break;
+                case 0x1D:  // CMD_SET_SCREENSHOT_QUALITY
+                    response = executionEngine.handleSetScreenshotQuality(payload);
+                    break;
 
                 // Input Extension
                 case 0x20:  // CMD_INPUT_TEXT

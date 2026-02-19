@@ -1,389 +1,450 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cortex Route Console</title>
-    <style>
-        * { box-sizing: border-box; }
-        body { margin: 0; font-family: "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
-        .layout { display: grid; grid-template-columns: 380px 1fr 420px; gap: 12px; height: 100vh; padding: 12px; }
-        .left { background: #111827; border: 1px solid #334155; border-radius: 10px; padding: 12px; overflow: auto; }
-        .center { background: #0b1220; border: 1px solid #334155; border-radius: 10px; display: flex; flex-direction: column; min-height: 0; }
-        .right { background: #0b1220; border: 1px solid #334155; border-radius: 10px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-        h3 { margin: 0 0 10px; font-size: 14px; color: #93c5fd; }
-        .group { margin-bottom: 10px; }
-        label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
-        input, select, textarea { width: 100%; background: #020617; border: 1px solid #334155; color: #e2e8f0; border-radius: 8px; padding: 8px; }
-        textarea { min-height: 96px; resize: vertical; }
-        .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-        button { border: none; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
-        .btn-primary { background: #2563eb; color: #fff; }
-        .btn-ok { background: #059669; color: #fff; }
-        .btn-secondary { background: #334155; color: #e2e8f0; }
-        .feed-head { padding: 10px 12px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; }
-        .feed-body { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-        .msg { border: 1px solid #334155; border-radius: 8px; padding: 8px; }
-        .msg.user { background: #10223f; border-color: #1d4ed8; }
-        .msg.sys { background: #15212b; border-color: #334155; }
-        .msg.llm { background: #1a2230; border-color: #475569; }
-        .meta { font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
-        .content { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; line-height: 1.45; }
-        .status { font-size: 12px; color: #94a3b8; }
-        .preview-head { padding: 10px 12px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; }
-        .preview-body { flex: 1; min-height: 0; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-        .screen-wrap { position: relative; flex: 1; min-height: 0; border: 1px solid #334155; border-radius: 8px; background: #020617; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-        .screen-wrap img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
-        .tap-marker { position: absolute; width: 18px; height: 18px; margin-left: -9px; margin-top: -9px; border: 2px solid #ef4444; border-radius: 50%; background: rgba(239, 68, 68, 0.2); pointer-events: none; display: none; }
-        .tap-marker::after { content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin-left: -2px; margin-top: -2px; border-radius: 50%; background: #ef4444; }
-        .preview-meta { font-size: 12px; color: #94a3b8; font-family: Consolas, monospace; }
-        @media (max-width: 1400px) {
-            .layout { grid-template-columns: 340px 1fr; grid-template-rows: 1fr 320px; }
-            .right { grid-column: 1 / span 2; }
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cortex Route Console</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
+    .layout { display: grid; grid-template-columns: 460px 1fr 420px; gap: 12px; height: 100vh; padding: 12px; }
+    .left, .center, .right { background: #0b1220; border: 1px solid #334155; border-radius: 10px; min-height: 0; }
+    .left { overflow: auto; padding: 12px; }
+    .center { display: flex; flex-direction: column; }
+    .right { display: flex; flex-direction: column; overflow: hidden; }
+    .card { border: 1px solid #1e293b; border-radius: 10px; padding: 10px; margin-bottom: 12px; background: #111827; }
+    h3 { margin: 0 0 10px; font-size: 14px; color: #93c5fd; }
+    .group { margin-bottom: 10px; }
+    label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
+    input, select, textarea { width: 100%; background: #020617; border: 1px solid #334155; color: #e2e8f0; border-radius: 8px; padding: 8px; }
+    textarea { min-height: 88px; resize: vertical; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    button { border: none; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    .btn-primary { background: #2563eb; color: #fff; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-ok { background: #059669; color: #fff; }
+    .feed-head, .preview-head { padding: 10px 12px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; }
+    .feed-body { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .msg { border: 1px solid #334155; border-radius: 8px; padding: 8px; }
+    .msg.user { background: #10223f; border-color: #1d4ed8; }
+    .msg.sys { background: #15212b; border-color: #334155; }
+    .msg.llm { background: #1a2230; border-color: #475569; }
+    .meta { font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
+    .content { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; line-height: 1.45; }
+    .status { font-size: 12px; color: #94a3b8; }
+    .preview-body { flex: 1; min-height: 0; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .screen-wrap { position: relative; flex: 1; min-height: 0; border: 1px solid #334155; border-radius: 8px; background: #020617; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    .screen-wrap img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+    .tap-marker { position: absolute; width: 18px; height: 18px; margin-left: -9px; margin-top: -9px; border: 2px solid #ef4444; border-radius: 50%; background: rgba(239, 68, 68, 0.2); pointer-events: none; display: none; }
+    .tap-marker::after { content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin-left: -2px; margin-top: -2px; border-radius: 50%; background: #ef4444; }
+    .preview-meta { font-size: 12px; color: #94a3b8; font-family: Consolas, monospace; }
+    @media (max-width: 1500px) {
+      .layout { grid-template-columns: 420px 1fr; grid-template-rows: 1fr 320px; }
+      .right { grid-column: 1 / span 2; }
+    }
+  </style>
 </head>
 <body>
-<div class="layout">
+  <div class="layout">
     <div class="left">
-        <h3>Cortex FSM</h3>
+      <div class="card">
+        <h3>用户意图</h3>
         <div class="group">
-            <label>用户意图</label>
-            <textarea id="userTask" placeholder="例如：打开贴吧，给我常逛的贴吧签到"></textarea>
-        </div>
-        <div class="group">
-            <label>Map 文件</label>
-            <select id="mapSelect"></select>
-        </div>
-        <div class="group">
-            <label>Package 过滤（可空）</label>
-            <input id="pkgFilter" placeholder="com.baidu.tieba">
-        </div>
-        <div class="row">
-            <div class="group">
-                <label>Node Retries</label>
-                <input id="nodeRetries" type="number" value="3">
-            </div>
-            <div class="group">
-                <label>Node Interval(s)</label>
-                <input id="nodeInterval" type="number" step="0.1" value="0.6">
-            </div>
-        </div>
-        <div class="group">
-            <label><input id="tapBindClickable" type="checkbox" style="width:auto; margin-right:6px;">TAP 绑定到 clickable 容器中心</label>
-        </div>
-
-        <h3 style="margin-top:14px;">LLM 配置</h3>
-        <div class="group">
-            <label>API Base URL</label>
-            <input id="llmApiUrl" placeholder="https://api.xxx.com/v1">
-        </div>
-        <div class="group">
-            <label>Touch Mode</label>
-            <select id="touchMode">
-                <option value="shell_first">input ??????</option>
-                <option value="uiautomation_first">UiAutomation ??</option>
-            </select>
-        </div>
-
-        <div class="group">
-            <label>API Key</label>
-            <input id="llmApiKey" type="password" placeholder="sk-...">
-        </div>
-        <div class="row">
-            <div class="group">
-                <label>Model</label>
-                <input id="llmModel" value="qwen-plus">
-            </div>
-            <div class="group">
-                <label>Timeout(s)</label>
-                <input id="llmTimeout" type="number" value="60">
-            </div>
+          <label>Task</label>
+          <textarea id="userTask" placeholder="例如：打开贴吧，帮我签到我的贴吧"></textarea>
         </div>
         <div class="btns">
-            <button class="btn-secondary" onclick="loadMaps()">刷新 Map</button>
-            <button class="btn-secondary" onclick="saveLlmConfig()">保存 LLM</button>
-            <button class="btn-primary" onclick="runFsm()">运行 FSM</button>
-            <button class="btn-secondary" onclick="cancelTask()">终止任务</button>
-            <button class="btn-ok" onclick="clearFeed()">清空交互</button>
+          <button class="btn-primary" onclick="runFsm()">运行 FSM</button>
+          <button class="btn-secondary" onclick="cancelTask()">终止任务</button>
+          <button class="btn-ok" onclick="clearFeed()">清空交互</button>
         </div>
+      </div>
+
+      <div class="card">
+        <h3>运行配置（可保存）</h3>
+        <div class="btns">
+          <button class="btn-secondary" onclick="loadMaps()">刷新 Map</button>
+          <button class="btn-secondary" onclick="saveConfig()">保存配置</button>
+          <button class="btn-secondary" onclick="loadConfig()">重载配置</button>
+        </div>
+
+        <div class="group">
+          <label>Map 文件</label>
+          <select id="mapSelect"></select>
+        </div>
+        <div class="group">
+          <label>Package 过滤（可空）</label>
+          <input id="pkgFilter" placeholder="com.baidu.tieba" />
+        </div>
+
+        <div class="row2">
+          <div class="group">
+            <label>Touch Mode</label>
+            <select id="touchMode">
+              <option value="shell_first">input 优先（推荐）</option>
+              <option value="uiautomation_first">UiAutomation 优先</option>
+            </select>
+          </div>
+          <div class="group">
+            <label><input id="tapBindClickable" type="checkbox" style="width:auto; margin-right:6px;" />TAP 绑定 clickable</label>
+          </div>
+        </div>
+
+        <div class="row2">
+          <div class="group">
+            <label><input id="reconnectBeforeRun" type="checkbox" style="width:auto; margin-right:6px;" checked />运行前重连</label>
+          </div>
+          <div class="group">
+            <label><input id="useLlmPlanner" type="checkbox" style="width:auto; margin-right:6px;" checked />启用 LLM Planner</label>
+          </div>
+        </div>
+
+        <h3>Route</h3>
+        <div class="row3">
+          <div class="group"><label>Node Retries</label><input id="nodeRetries" type="number" value="3" /></div>
+          <div class="group"><label>Node Interval(s)</label><input id="nodeInterval" type="number" step="0.1" value="0.6" /></div>
+          <div class="group"><label>Max Restarts</label><input id="maxRouteRestarts" type="number" value="0" /></div>
+        </div>
+        <div class="row2">
+          <div class="group"><label><input id="routeRecoveryEnabled" type="checkbox" style="width:auto; margin-right:6px;" />Route Recovery</label></div>
+          <div class="group"><label><input id="useVlmTakeover" type="checkbox" style="width:auto; margin-right:6px;" />VLM Takeover</label></div>
+        </div>
+
+        <h3>FSM</h3>
+        <div class="row3">
+          <div class="group"><label>Max Turns</label><input id="fsmMaxTurns" type="number" value="40" /></div>
+          <div class="group"><label>Max Cmd/Turn</label><input id="fsmMaxCmdPerTurn" type="number" value="1" /></div>
+          <div class="group"><label>Max Vision Turns</label><input id="fsmMaxVisionTurns" type="number" value="20" /></div>
+        </div>
+        <div class="row2">
+          <div class="group"><label>Action Interval(s)</label><input id="fsmActionInterval" type="number" step="0.1" value="0.8" /></div>
+          <div class="group"><label>Screenshot Settle(s)</label><input id="fsmScreenshotSettle" type="number" step="0.1" value="0.6" /></div>
+        </div>
+        <div class="row3">
+          <div class="group"><label>Tap Jitter σ(px)</label><input id="fsmTapJitter" type="number" step="0.1" value="2.0" /></div>
+          <div class="group"><label>Swipe Jitter σ(px)</label><input id="fsmSwipeJitter" type="number" step="0.1" value="4.0" /></div>
+          <div class="group"><label>Swipe Dur Jitter</label><input id="fsmSwipeDurJitter" type="number" step="0.01" value="0.12" /></div>
+        </div>
+        <div class="row3">
+          <div class="group"><label>XML Stable Interval(s)</label><input id="fsmXmlStableInterval" type="number" step="0.1" value="0.3" /></div>
+          <div class="group"><label>XML Stable Samples</label><input id="fsmXmlStableSamples" type="number" value="4" /></div>
+          <div class="group"><label>XML Stable Timeout(s)</label><input id="fsmXmlStableTimeout" type="number" step="0.1" value="4.0" /></div>
+        </div>
+
+        <h3>LLM</h3>
+        <div class="group"><label>API Base URL</label><input id="llmApiUrl" placeholder="https://api.xxx.com/v1" /></div>
+        <div class="group"><label>API Key</label><input id="llmApiKey" type="password" placeholder="sk-..." /></div>
+        <div class="row3">
+          <div class="group"><label>Model</label><input id="llmModel" value="qwen-plus" /></div>
+          <div class="group"><label>Timeout(s)</label><input id="llmTimeout" type="number" value="60" /></div>
+          <div class="group"><label>Vision JPEG Q(10-95)</label><input id="visionJpegQuality" type="number" min="10" max="95" value="35" /></div>
+        </div>
+      </div>
     </div>
 
     <div class="center">
-        <div class="feed-head">
-            <div style="font-weight:600;">交互信息流</div>
-            <div id="runStatus" class="status">空闲</div>
-        </div>
-        <div id="feed" class="feed-body"></div>
+      <div class="feed-head">
+        <div style="font-weight:600;">交互信息流</div>
+        <div id="runStatus" class="status">空闲</div>
+      </div>
+      <div id="feed" class="feed-body"></div>
     </div>
 
     <div class="right">
-        <div class="preview-head">
-            <div style="font-weight:600;">实时截图</div>
-            <button class="btn-secondary" onclick="refreshTaskScreenshot()">刷新</button>
+      <div class="preview-head">
+        <div style="font-weight:600;">实时截图</div>
+        <button class="btn-secondary" onclick="refreshTaskScreenshot()">刷新</button>
+      </div>
+      <div class="preview-body">
+        <div class="screen-wrap" id="screenWrap">
+          <img id="taskShot" alt="task screenshot" />
+          <div id="tapMarker" class="tap-marker"></div>
         </div>
-        <div class="preview-body">
-            <div class="screen-wrap" id="screenWrap">
-                <img id="taskShot" alt="task screenshot">
-                <div id="tapMarker" class="tap-marker"></div>
-            </div>
-            <div id="shotMeta" class="preview-meta">暂无截图</div>
-        </div>
+        <div id="shotMeta" class="preview-meta">暂无截图</div>
+      </div>
     </div>
-</div>
+  </div>
 
-<script>
-let currentTaskId = "";
-let screenInfo = { width: 0, height: 0 };
-let lastTap = null;
+  <script>
+    let currentTaskId = "";
+    let screenInfo = { width: 0, height: 0 };
+    let lastTap = null;
+    let pendingMapPath = "";
 
-async function jfetch(url, method = "GET", body = null) {
-    const opt = { method, headers: { "Content-Type": "application/json" } };
-    if (body !== null) opt.body = JSON.stringify(body);
-    const r = await fetch(url, opt);
-    return await r.json();
-}
+    async function jfetch(url, method = "GET", body = null) {
+      const opt = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== null) opt.body = JSON.stringify(body);
+      const r = await fetch(url, opt);
+      return await r.json();
+    }
 
-function feedPush(kind, title, content) {
-    const feed = document.getElementById("feed");
-    const item = document.createElement("div");
-    item.className = `msg ${kind}`;
-    const ts = new Date().toLocaleTimeString();
-    item.innerHTML = `<div class="meta">${ts} | ${title}</div><div class="content"></div>`;
-    item.querySelector(".content").textContent = typeof content === "string" ? content : JSON.stringify(content, null, 2);
-    feed.appendChild(item);
-    feed.scrollTop = feed.scrollHeight;
-}
+    function feedPush(kind, title, content) {
+      const feed = document.getElementById("feed");
+      const item = document.createElement("div");
+      item.className = `msg ${kind}`;
+      const ts = new Date().toLocaleTimeString();
+      item.innerHTML = `<div class="meta">${ts} | ${title}</div><div class="content"></div>`;
+      item.querySelector(".content").textContent = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+      feed.appendChild(item);
+      feed.scrollTop = feed.scrollHeight;
+    }
 
-function clearFeed() {
-    document.getElementById("feed").innerHTML = "";
-}
+    function clearFeed() { document.getElementById("feed").innerHTML = ""; }
 
-function clearPreview() {
-    const img = document.getElementById("taskShot");
-    const marker = document.getElementById("tapMarker");
-    document.getElementById("shotMeta").textContent = "暂无截图";
-    img.removeAttribute("src");
-    marker.style.display = "none";
-    lastTap = null;
-}
+    function clearPreview() {
+      const img = document.getElementById("taskShot");
+      document.getElementById("shotMeta").textContent = "暂无截图";
+      img.removeAttribute("src");
+      document.getElementById("tapMarker").style.display = "none";
+      lastTap = null;
+    }
 
-async function loadScreenSize() {
-    const data = await jfetch("/api/command/get_screen_size", "POST", {});
-    if (data && data.success && data.response) {
+    async function loadScreenSize() {
+      const data = await jfetch("/api/command/get_screen_size", "POST", {});
+      if (data && data.success && data.response) {
         screenInfo.width = Number(data.response.width || 0);
         screenInfo.height = Number(data.response.height || 0);
+      }
     }
-}
 
-function renderTapMarker() {
-    const img = document.getElementById("taskShot");
-    const marker = document.getElementById("tapMarker");
-    if (!lastTap || !screenInfo.width || !screenInfo.height || !img.complete || !img.naturalWidth || !img.naturalHeight) {
+    function renderTapMarker() {
+      const img = document.getElementById("taskShot");
+      const marker = document.getElementById("tapMarker");
+      if (!lastTap || !screenInfo.width || !screenInfo.height || !img.complete || !img.naturalWidth || !img.naturalHeight) {
         marker.style.display = "none";
         return;
+      }
+      const wrap = document.getElementById("screenWrap");
+      const wrapW = wrap.clientWidth;
+      const wrapH = wrap.clientHeight;
+      const scale = Math.min(wrapW / screenInfo.width, wrapH / screenInfo.height);
+      const drawW = Math.round(screenInfo.width * scale);
+      const drawH = Math.round(screenInfo.height * scale);
+      const offsetX = Math.floor((wrapW - drawW) / 2);
+      const offsetY = Math.floor((wrapH - drawH) / 2);
+      const px = offsetX + (lastTap.x / screenInfo.width) * drawW;
+      const py = offsetY + (lastTap.y / screenInfo.height) * drawH;
+      marker.style.left = `${px}px`;
+      marker.style.top = `${py}px`;
+      marker.style.display = "block";
     }
 
-    const wrap = document.getElementById("screenWrap");
-    const wrapW = wrap.clientWidth;
-    const wrapH = wrap.clientHeight;
-    const scale = Math.min(wrapW / screenInfo.width, wrapH / screenInfo.height);
-    const drawW = Math.round(screenInfo.width * scale);
-    const drawH = Math.round(screenInfo.height * scale);
-    const offsetX = Math.floor((wrapW - drawW) / 2);
-    const offsetY = Math.floor((wrapH - drawH) / 2);
-
-    const px = offsetX + (lastTap.x / screenInfo.width) * drawW;
-    const py = offsetY + (lastTap.y / screenInfo.height) * drawH;
-    marker.style.left = `${px}px`;
-    marker.style.top = `${py}px`;
-    marker.style.display = "block";
-}
-
-async function refreshTaskScreenshot() {
-    if (!currentTaskId) return;
-    const img = document.getElementById("taskShot");
-    img.onload = () => {
+    async function refreshTaskScreenshot() {
+      if (!currentTaskId) return;
+      const img = document.getElementById("taskShot");
+      img.onload = () => {
         renderTapMarker();
         const ts = new Date().toLocaleTimeString();
         const tapText = lastTap ? ` | tap=(${lastTap.x}, ${lastTap.y})` : "";
         document.getElementById("shotMeta").textContent = `${ts}${tapText}`;
-    };
-    img.src = `/api/command/screenshot/raw?t=${Date.now()}`;
-}
+      };
+      img.src = `/api/command/screenshot/raw?t=${Date.now()}`;
+    }
 
-async function loadLlmConfig() {
-    const data = await jfetch("/api/cortex/llm/config");
-    if (!data.success) return;
-    const c = data.data || {};
-    document.getElementById("llmApiUrl").value = c.api_base_url || "";
-    document.getElementById("llmApiKey").value = c.api_key || "";
-    document.getElementById("llmModel").value = c.model_name || "qwen-plus";
-    document.getElementById("llmTimeout").value = c.timeout ?? 60;
-    document.getElementById("nodeRetries").value = c.node_exists_retries ?? 3;
-    document.getElementById("nodeInterval").value = c.node_exists_interval_sec ?? 0.6;
-    document.getElementById("touchMode").value = c.touch_mode || "shell_first";
-}
-
-async function saveLlmConfig() {
-    const payload = {
+    function collectConfig() {
+      return {
         api_base_url: document.getElementById("llmApiUrl").value.trim(),
         api_key: document.getElementById("llmApiKey").value.trim(),
         model_name: document.getElementById("llmModel").value.trim(),
         temperature: 0.1,
         timeout: Number(document.getElementById("llmTimeout").value || "60"),
+        vision_jpeg_quality: Number(document.getElementById("visionJpegQuality").value || "35"),
+        map_filepath: document.getElementById("mapSelect").value || "",
+        package_name: document.getElementById("pkgFilter").value.trim(),
+        touch_mode: document.getElementById("touchMode").value,
+        reconnect_before_run: document.getElementById("reconnectBeforeRun").checked,
+        use_llm_planner: document.getElementById("useLlmPlanner").checked,
         node_exists_retries: Number(document.getElementById("nodeRetries").value || "3"),
         node_exists_interval_sec: Number(document.getElementById("nodeInterval").value || "0.6"),
-        touch_mode: document.getElementById("touchMode").value
-    };
-    const data = await jfetch("/api/cortex/llm/config", "POST", payload);
-    feedPush("sys", "llm/config", data.message || (data.success ? "ok" : "failed"));
-}
+        route_recovery_enabled: document.getElementById("routeRecoveryEnabled").checked,
+        max_route_restarts: Number(document.getElementById("maxRouteRestarts").value || "0"),
+        use_vlm_takeover: document.getElementById("useVlmTakeover").checked,
+        fsm_max_turns: Number(document.getElementById("fsmMaxTurns").value || "40"),
+        fsm_max_commands_per_turn: Number(document.getElementById("fsmMaxCmdPerTurn").value || "1"),
+        fsm_max_vision_turns: Number(document.getElementById("fsmMaxVisionTurns").value || "20"),
+        fsm_action_interval_sec: Number(document.getElementById("fsmActionInterval").value || "0.8"),
+        fsm_screenshot_settle_sec: Number(document.getElementById("fsmScreenshotSettle").value || "0.6"),
+        fsm_tap_bind_clickable: document.getElementById("tapBindClickable").checked,
+        fsm_tap_jitter_sigma_px: Number(document.getElementById("fsmTapJitter").value || "2"),
+        fsm_swipe_jitter_sigma_px: Number(document.getElementById("fsmSwipeJitter").value || "4"),
+        fsm_swipe_duration_jitter_ratio: Number(document.getElementById("fsmSwipeDurJitter").value || "0.12"),
+        fsm_xml_stable_interval_sec: Number(document.getElementById("fsmXmlStableInterval").value || "0.3"),
+        fsm_xml_stable_samples: Number(document.getElementById("fsmXmlStableSamples").value || "4"),
+        fsm_xml_stable_timeout_sec: Number(document.getElementById("fsmXmlStableTimeout").value || "4.0")
+      };
+    }
 
-async function loadMaps() {
-    const packageName = document.getElementById("pkgFilter").value.trim();
-    const data = await jfetch("/api/maps/list");
-    const sel = document.getElementById("mapSelect");
-    sel.innerHTML = "";
+    function applyConfig(c) {
+      const cfg = c || {};
+      document.getElementById("llmApiUrl").value = cfg.api_base_url || "";
+      document.getElementById("llmApiKey").value = cfg.api_key || "";
+      document.getElementById("llmModel").value = cfg.model_name || "qwen-plus";
+      document.getElementById("llmTimeout").value = cfg.timeout ?? 60;
+      document.getElementById("visionJpegQuality").value = cfg.vision_jpeg_quality ?? 35;
+      document.getElementById("pkgFilter").value = cfg.package_name || "";
+      document.getElementById("touchMode").value = cfg.touch_mode || "shell_first";
+      document.getElementById("reconnectBeforeRun").checked = !!cfg.reconnect_before_run;
+      document.getElementById("useLlmPlanner").checked = !!cfg.use_llm_planner;
+      document.getElementById("nodeRetries").value = cfg.node_exists_retries ?? 3;
+      document.getElementById("nodeInterval").value = cfg.node_exists_interval_sec ?? 0.6;
+      document.getElementById("routeRecoveryEnabled").checked = !!cfg.route_recovery_enabled;
+      document.getElementById("maxRouteRestarts").value = cfg.max_route_restarts ?? 0;
+      document.getElementById("useVlmTakeover").checked = !!cfg.use_vlm_takeover;
+      document.getElementById("fsmMaxTurns").value = cfg.fsm_max_turns ?? 40;
+      document.getElementById("fsmMaxCmdPerTurn").value = cfg.fsm_max_commands_per_turn ?? 1;
+      document.getElementById("fsmMaxVisionTurns").value = cfg.fsm_max_vision_turns ?? 20;
+      document.getElementById("fsmActionInterval").value = cfg.fsm_action_interval_sec ?? 0.8;
+      document.getElementById("fsmScreenshotSettle").value = cfg.fsm_screenshot_settle_sec ?? 0.6;
+      document.getElementById("tapBindClickable").checked = !!cfg.fsm_tap_bind_clickable;
+      document.getElementById("fsmTapJitter").value = cfg.fsm_tap_jitter_sigma_px ?? 2.0;
+      document.getElementById("fsmSwipeJitter").value = cfg.fsm_swipe_jitter_sigma_px ?? 4.0;
+      document.getElementById("fsmSwipeDurJitter").value = cfg.fsm_swipe_duration_jitter_ratio ?? 0.12;
+      document.getElementById("fsmXmlStableInterval").value = cfg.fsm_xml_stable_interval_sec ?? 0.3;
+      document.getElementById("fsmXmlStableSamples").value = cfg.fsm_xml_stable_samples ?? 4;
+      document.getElementById("fsmXmlStableTimeout").value = cfg.fsm_xml_stable_timeout_sec ?? 4.0;
+      pendingMapPath = cfg.map_filepath || "";
+    }
 
-    const autoOpt = document.createElement("option");
-    autoOpt.value = "";
-    autoOpt.textContent = "自动按应用选择最新 map";
-    sel.appendChild(autoOpt);
+    async function loadConfig() {
+      const data = await jfetch("/api/cortex/llm/config");
+      if (!data.success) return;
+      applyConfig(data.data || {});
+      await loadMaps();
+    }
 
-    if (!data.success) return;
+    async function saveConfig() {
+      const payload = collectConfig();
+      const data = await jfetch("/api/cortex/llm/config", "POST", payload);
+      feedPush("sys", "config/save", data.message || (data.success ? "ok" : "failed"));
+    }
 
-    let maps = data.data || [];
-    if (packageName) maps = maps.filter(m => m.package === packageName);
-
-    for (const m of maps) {
+    async function loadMaps() {
+      const packageName = document.getElementById("pkgFilter").value.trim();
+      const data = await jfetch("/api/maps/list");
+      const sel = document.getElementById("mapSelect");
+      sel.innerHTML = "";
+      const autoOpt = document.createElement("option");
+      autoOpt.value = "";
+      autoOpt.textContent = "自动按应用选择最新 map";
+      sel.appendChild(autoOpt);
+      if (!data.success) return;
+      let maps = data.data || [];
+      if (packageName) maps = maps.filter((m) => m.package === packageName);
+      for (const m of maps) {
         const opt = document.createElement("option");
         opt.value = m.filepath;
         opt.textContent = `${m.package} | ${m.filename}`;
         sel.appendChild(opt);
+      }
+      if (pendingMapPath) {
+        const matched = Array.from(sel.options).find((o) => o.value === pendingMapPath);
+        sel.value = matched ? pendingMapPath : "";
+      } else {
+        sel.value = "";
+      }
     }
-    sel.value = "";
-}
 
-async function pollTask(taskId) {
-    let cursor = 0;
-    currentTaskId = taskId;
-
-    while (true) {
+    async function pollTask(taskId) {
+      let cursor = 0;
+      currentTaskId = taskId;
+      while (true) {
         const p = await jfetch(`/api/cortex/task/${taskId}/poll?cursor=${cursor}`);
         if (!p.success) {
-            feedPush("sys", "task/poll", p.message || "poll_failed");
-            return;
+          feedPush("sys", "task/poll", p.message || "poll_failed");
+          return;
         }
-
         cursor = p.next_cursor || cursor;
-        for (const ev of (p.events || [])) {
-            const stage = ev.stage || "fsm";
-            const event = ev.event || "event";
-
-            if (stage === "llm" && event === "prompt") {
-                feedPush("user", `LLM Prompt (${ev.state || ""})`, ev.prompt || "");
-                continue;
-            }
-            if (stage === "llm" && event === "response") {
-                feedPush("llm", `LLM Response (${ev.state || ""})`, ev.response || "");
-                continue;
-            }
-
-            if (stage === "exec" && event === "tap_start") {
-                lastTap = { x: Number(ev.x || 0), y: Number(ev.y || 0) };
-                renderTapMarker();
-            }
-            if (stage === "fsm" && event === "vision_screenshot_ready") {
-                await refreshTaskScreenshot();
-            }
-
-            feedPush("sys", `${stage}/${event}`, ev);
+        for (const ev of p.events || []) {
+          const stage = ev.stage || "fsm";
+          const event = ev.event || "event";
+          if (stage === "llm" && event === "prompt") { feedPush("user", `LLM Prompt (${ev.state || ""})`, ev.prompt || ""); continue; }
+          if (stage === "llm" && event === "response") { feedPush("llm", `LLM Response (${ev.state || ""})`, ev.response || ""); continue; }
+          if (stage === "exec" && event === "tap_start") { lastTap = { x: Number(ev.x || 0), y: Number(ev.y || 0) }; renderTapMarker(); }
+          if (stage === "fsm" && event === "vision_screenshot_ready") { await refreshTaskScreenshot(); }
+          feedPush("sys", `${stage}/${event}`, ev);
         }
-
         if (p.done) {
-            const r = p.result || {};
-            feedPush(p.task_success ? "sys" : "llm", "FSM Result", r);
-            document.getElementById("runStatus").textContent = p.task_success ? "完成" : `失败: ${p.message || "unknown"}`;
-            if (p.message === "task_cancelled") {
-                document.getElementById("runStatus").textContent = "已终止";
-            }
-            currentTaskId = "";
-            return;
+          const r = p.result || {};
+          feedPush(p.task_success ? "sys" : "llm", "FSM Result", r);
+          document.getElementById("runStatus").textContent = p.task_success ? "完成" : `失败: ${p.message || "unknown"}`;
+          if (p.message === "task_cancelled") {
+            document.getElementById("runStatus").textContent = "已终止";
+          }
+          currentTaskId = "";
+          return;
         }
-
-        await new Promise(res => setTimeout(res, 400));
+        await new Promise((res) => setTimeout(res, 400));
+      }
     }
-}
 
-async function cancelTask() {
-    if (!currentTaskId) {
+    async function cancelTask() {
+      if (!currentTaskId) {
         feedPush("sys", "Task Cancel", "当前没有运行中的任务");
         return;
-    }
-    const r = await jfetch(`/api/cortex/task/${currentTaskId}/cancel`, "POST", {});
-    feedPush(r.success ? "sys" : "llm", "Task Cancel", r.message || "cancel_failed");
-}
-
-async function runFsm() {
-    const task = document.getElementById("userTask").value.trim();
-    if (!task) {
-        alert("请先输入用户意图");
-        return;
+      }
+      const r = await jfetch(`/api/cortex/task/${currentTaskId}/cancel`, "POST", {});
+      feedPush(r.success ? "sys" : "llm", "Task Cancel", r.message || "cancel_failed");
     }
 
-    document.getElementById("runStatus").textContent = "运行中...";
-    feedPush("user", "User Intent", task);
-    clearPreview();
-    await loadScreenSize();
+    async function runFsm() {
+      const task = document.getElementById("userTask").value.trim();
+      if (!task) { alert("请先输入用户意图"); return; }
 
-    const payload = {
+      await saveConfig();
+
+      document.getElementById("runStatus").textContent = "运行中...";
+      feedPush("user", "User Intent", task);
+      clearPreview();
+      await loadScreenSize();
+
+      const cfg = collectConfig();
+      const payload = {
         user_task: task,
-        map_filepath: document.getElementById("mapSelect").value || "",
-        package_name: document.getElementById("pkgFilter").value.trim(),
-        touch_mode: document.getElementById("touchMode").value,
-        reconnect_before_run: true,
-        use_llm_planner: true,
+        map_filepath: cfg.map_filepath,
+        package_name: cfg.package_name,
+        vision_jpeg_quality: cfg.vision_jpeg_quality,
+        touch_mode: cfg.touch_mode,
+        reconnect_before_run: cfg.reconnect_before_run,
+        use_llm_planner: cfg.use_llm_planner,
         route_config: {
-            node_exists_retries: Number(document.getElementById("nodeRetries").value || "3"),
-            node_exists_interval_sec: Number(document.getElementById("nodeInterval").value || "0.6"),
-            route_recovery_enabled: false,
-            max_route_restarts: 0,
-            use_vlm_takeover: false
+          node_exists_retries: cfg.node_exists_retries,
+          node_exists_interval_sec: cfg.node_exists_interval_sec,
+          route_recovery_enabled: cfg.route_recovery_enabled,
+          max_route_restarts: cfg.max_route_restarts,
+          use_vlm_takeover: cfg.use_vlm_takeover
         },
         fsm_config: {
-            max_turns: 40,
-            max_commands_per_turn: 1,
-            max_vision_turns: 20,
-            action_interval_sec: 0.8,
-            screenshot_settle_sec: 0.6,
-            tap_bind_clickable: document.getElementById("tapBindClickable").checked,
-            tap_jitter_sigma_px: 2.0,
-            swipe_jitter_sigma_px: 4.0,
-            swipe_duration_jitter_ratio: 0.12,
-            xml_stable_interval_sec: 0.3,
-            xml_stable_samples: 4,
-            xml_stable_timeout_sec: 4.0
+          max_turns: cfg.fsm_max_turns,
+          max_commands_per_turn: cfg.fsm_max_commands_per_turn,
+          max_vision_turns: cfg.fsm_max_vision_turns,
+          action_interval_sec: cfg.fsm_action_interval_sec,
+          screenshot_settle_sec: cfg.fsm_screenshot_settle_sec,
+          tap_bind_clickable: cfg.fsm_tap_bind_clickable,
+          tap_jitter_sigma_px: cfg.fsm_tap_jitter_sigma_px,
+          swipe_jitter_sigma_px: cfg.fsm_swipe_jitter_sigma_px,
+          swipe_duration_jitter_ratio: cfg.fsm_swipe_duration_jitter_ratio,
+          xml_stable_interval_sec: cfg.fsm_xml_stable_interval_sec,
+          xml_stable_samples: cfg.fsm_xml_stable_samples,
+          xml_stable_timeout_sec: cfg.fsm_xml_stable_timeout_sec
         }
-    };
+      };
 
-    const start = await jfetch("/api/cortex/fsm/start", "POST", payload);
-    if (!start.success) {
+      const start = await jfetch("/api/cortex/fsm/start", "POST", payload);
+      if (!start.success) {
         feedPush("sys", "FSM Start Failed", start.message || "unknown");
         return;
+      }
+      feedPush("sys", "FSM Task", `task_id=${start.task_id}`);
+      await pollTask(start.task_id);
     }
 
-    feedPush("sys", "FSM Task", `task_id=${start.task_id}`);
-    await pollTask(start.task_id);
-}
-
-window.addEventListener("resize", renderTapMarker);
-(async function init() {
-    await loadLlmConfig();
-    await loadMaps();
-    await loadScreenSize();
-})();
-</script>
+    window.addEventListener("resize", renderTapMarker);
+    (async function init() {
+      await loadConfig();
+      await loadScreenSize();
+    })();
+  </script>
 </body>
 </html>

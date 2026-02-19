@@ -34,6 +34,7 @@ from .constants import (
     CMD_SCREENSHOT,
     CMD_WAKE,
     CMD_SET_TOUCH_MODE,
+    CMD_SET_SCREENSHOT_QUALITY,
     # Sense Layer commands
     CMD_GET_ACTIVITY,
     CMD_FIND_NODE,
@@ -376,13 +377,38 @@ class LXBLinkClient:
         self._ensure_connected()
 
         logger.info("Requesting screenshot (fragmented mode)")
-        response = self._transport.request_screenshot_fragmented() # type: ignore
+        last_err: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                response = self._transport.request_screenshot_fragmented() # type: ignore
+                logger.info(
+                    f"Screenshot transfer successful: {len(response)} bytes "
+                    f"({len(response) / 1024:.1f} KB)"
+                )
+                return response
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    f"Fragmented screenshot failed (attempt={attempt + 1}/2): {e}"
+                )
+                try:
+                    # Drain stale frames but keep sequence continuity.
+                    self.reset_runtime_state(reset_seq=False)
+                except Exception:
+                    pass
 
-        logger.info(
-            f"Screenshot transfer successful: {len(response)} bytes "
-            f"({len(response) / 1024:.1f} KB)"
-        )
-        return response
+        logger.warning("Falling back to legacy single-frame screenshot mode")
+        try:
+            response = self.screenshot()
+            logger.info(
+                f"Legacy screenshot successful: {len(response)} bytes "
+                f"({len(response) / 1024:.1f} KB)"
+            )
+            return response
+        except Exception:
+            if last_err:
+                raise last_err
+            raise
 
     def reset_runtime_state(self, reset_seq: bool = True) -> int:
         """
@@ -880,6 +906,25 @@ class LXBLinkClient:
         response = self._transport.send_reliable(CMD_SET_TOUCH_MODE, mode)
         ok = len(response) > 0 and response[0] == 0x01
         logger.info(f"SET_TOUCH_MODE {'successful' if ok else 'failed'}")
+        return ok
+
+    def set_screenshot_quality(self, quality: int) -> bool:
+        """
+        Configure screenshot JPEG quality on Android side.
+
+        Args:
+            quality: JPEG quality in [1, 100].
+
+        Returns:
+            True if quality update acknowledged.
+        """
+        self._ensure_connected()
+        q = max(1, min(100, int(quality)))
+        payload = bytes([q & 0xFF])
+        logger.info(f"Sending SET_SCREENSHOT_QUALITY: {q}")
+        response = self._transport.send_reliable(CMD_SET_SCREENSHOT_QUALITY, payload)
+        ok = len(response) > 0 and response[0] == 0x01
+        logger.info(f"SET_SCREENSHOT_QUALITY {'successful' if ok else 'failed'}")
         return ok
 
     def get_screen_state(self) -> tuple[bool, int]:

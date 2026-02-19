@@ -332,6 +332,35 @@ public class ExecutionEngine {
         return new byte[]{0x01};
     }
 
+    /**
+     * Handle screenshot quality switch (0x1D).
+     *
+     * Payload format: quality[1B], range 1..100.
+     *
+     * Response: status[1B]
+     */
+    public byte[] handleSetScreenshotQuality(byte[] payload) {
+        if (payload.length < 1) {
+            System.err.println(TAG + " SET_SCREENSHOT_QUALITY payload too short: " + payload.length);
+            return new byte[]{0x00};
+        }
+
+        if (uiAutomation == null) {
+            System.err.println(TAG + " UiAutomation not available");
+            return new byte[]{0x00};
+        }
+
+        int quality = payload[0] & 0xFF;
+        if (quality < 1 || quality > 100) {
+            System.err.println(TAG + " SET_SCREENSHOT_QUALITY invalid value: " + quality);
+            return new byte[]{0x00};
+        }
+
+        uiAutomation.setScreenshotQuality(quality);
+        System.out.println(TAG + " SET_SCREENSHOT_QUALITY: " + quality);
+        return new byte[]{0x01};
+    }
+
 
     /**
      * 处理 LAUNCH_APP 命令 (0x43)

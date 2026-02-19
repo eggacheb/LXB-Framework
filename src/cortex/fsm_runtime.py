@@ -94,8 +94,6 @@ class PromptBuilder:
         )
 
     def _dsl_semantics(self, context: CortexContext) -> str:
-        w = int(context.device_info.get("width") or 0)
-        h = int(context.device_info.get("height") or 0)
         return (
             "DSL Semantics:\n"
             "- SET_APP <package_name>: choose exactly one package from AppCandidates.\n"
@@ -104,11 +102,9 @@ class PromptBuilder:
             "- SWIPE <x1> <y1> <x2> <y2> <duration_ms>: absolute pixel coordinates + duration in ms.\n"
             "- INPUT \"<text>\": input text into focused field.\n"
             "- WAIT <ms>: wait milliseconds.\n"
+            "- BACK: press Android back key once.\n"
             "- DONE: task complete.\n"
             "- FAIL <reason>: stop with explicit reason.\n"
-            f"Screen Bounds: x in [0,{max(0, w - 1)}], y in [0,{max(0, h - 1)}].\n"
-            "Coordinate Rule: if you reason with normalized coordinates (0..1), convert to absolute pixels before output.\n"
-            "Conversion: x_px = round(x_norm * (width-1)), y_px = round(y_norm * (height-1)).\n"
         )
 
     def build(self, state: CortexState, context: CortexContext, allowed_ops: Set[str]) -> str:
@@ -187,6 +183,7 @@ class PromptBuilder:
                     "SWIPE 640 2200 640 900 350\n",
                     "INPUT \"搜索词\"\n",
                     "WAIT 800\n",
+                    "BACK\n",
                     "DONE\n",
                     "FAIL blocked_by_popup",
                 ]
@@ -213,7 +210,7 @@ class CortexFSMEngine:
     _ALLOWED_OPS: Dict[CortexState, Set[str]] = {
         CortexState.APP_RESOLVE: {"SET_APP", "FAIL"},
         CortexState.ROUTE_PLAN: {"ROUTE", "FAIL"},
-        CortexState.VISION_ACT: {"TAP", "SWIPE", "INPUT", "WAIT", "DONE", "FAIL"},
+        CortexState.VISION_ACT: {"TAP", "SWIPE", "INPUT", "WAIT", "BACK", "DONE", "FAIL"},
     }
 
     def __init__(
@@ -478,9 +475,6 @@ class CortexFSMEngine:
         try:
             if cmd.op == "TAP":
                 x, y = int(cmd.args[0]), int(cmd.args[1])
-                if not self._in_screen_bounds(context, x, y):
-                    context.error = f"tap_out_of_bounds:{x},{y}"
-                    return False
                 if self.fsm_config.tap_bind_clickable:
                     tx, ty, bound = self._resolve_tap_clickable(context, x, y)
                     if bound:
@@ -501,9 +495,6 @@ class CortexFSMEngine:
                 return True
             if cmd.op == "SWIPE":
                 x1, y1, x2, y2, dur = [int(v) for v in cmd.args]
-                if not self._in_screen_bounds(context, x1, y1) or not self._in_screen_bounds(context, x2, y2):
-                    context.error = f"swipe_out_of_bounds:{x1},{y1}->{x2},{y2}"
-                    return False
                 jx1, jy1 = self._apply_point_jitter(context, x1, y1, self.fsm_config.swipe_jitter_sigma_px)
                 jx2, jy2 = self._apply_point_jitter(context, x2, y2, self.fsm_config.swipe_jitter_sigma_px)
                 jdur = self._apply_duration_jitter(dur, self.fsm_config.swipe_duration_jitter_ratio)
@@ -542,6 +533,12 @@ class CortexFSMEngine:
                 self._log(context, "exec", "wait_start", ms=int(cmd.args[0]))
                 time.sleep(max(0, int(cmd.args[0])) / 1000.0)
                 self._log(context, "exec", "wait_done", ms=int(cmd.args[0]))
+                return True
+            if cmd.op == "BACK":
+                self._log(context, "exec", "back_start")
+                self.client.key_event(4)
+                self._log(context, "exec", "back_done")
+                self._wait_for_xml_stable(context, reason="back")
                 return True
             context.error = f"unsupported_action_op:{cmd.op}"
             return False
@@ -765,6 +762,8 @@ class CortexFSMEngine:
             action = str(obj.get("action") or "").strip().upper()
             if action == "DONE":
                 return "DONE"
+            if action == "BACK":
+                return "BACK"
         return text
 
     def _log(self, context: CortexContext, stage: str, event: str, **kwargs: Any) -> None:

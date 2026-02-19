@@ -9,6 +9,7 @@ import sys
 import os
 import base64
 import json
+import io
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -66,9 +67,30 @@ def _default_cortex_llm_config() -> dict:
         'model_name': os.getenv('CORTEX_LLM_MODEL_NAME', 'qwen-plus'),
         'temperature': float(os.getenv('CORTEX_LLM_TEMPERATURE', '0.1')),
         'timeout': int(os.getenv('CORTEX_LLM_TIMEOUT', '30')),
+        'vision_jpeg_quality': int(os.getenv('CORTEX_VISION_JPEG_QUALITY', '35')),
         'node_exists_retries': int(os.getenv('CORTEX_NODE_EXISTS_RETRIES', '3')),
         'node_exists_interval_sec': float(os.getenv('CORTEX_NODE_EXISTS_INTERVAL_SEC', '0.6')),
         'touch_mode': os.getenv('CORTEX_TOUCH_MODE', 'shell_first'),
+        # Route/FSM runtime defaults (persisted in same config file).
+        'map_filepath': '',
+        'package_name': '',
+        'reconnect_before_run': True,
+        'use_llm_planner': True,
+        'route_recovery_enabled': False,
+        'max_route_restarts': 0,
+        'use_vlm_takeover': False,
+        'fsm_max_turns': 40,
+        'fsm_max_commands_per_turn': 1,
+        'fsm_max_vision_turns': 20,
+        'fsm_action_interval_sec': 0.8,
+        'fsm_screenshot_settle_sec': 0.6,
+        'fsm_tap_bind_clickable': False,
+        'fsm_tap_jitter_sigma_px': 2.0,
+        'fsm_swipe_jitter_sigma_px': 4.0,
+        'fsm_swipe_duration_jitter_ratio': 0.12,
+        'fsm_xml_stable_interval_sec': 0.3,
+        'fsm_xml_stable_samples': 4,
+        'fsm_xml_stable_timeout_sec': 4.0,
     }
 
 
@@ -241,9 +263,24 @@ def _build_llm_complete_with_image(config: dict):
         timeout=float(config.get('timeout', 30)),
     )
     temperature = float(config.get('temperature', 0.1))
+    jpeg_quality = int(config.get('vision_jpeg_quality', 35))
+
+    def _reencode_jpeg(image_bytes: bytes, quality: int) -> bytes:
+        quality = max(10, min(95, int(quality)))
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                if img.mode not in ('RGB', 'L'):
+                    img = img.convert('RGB')
+                out = io.BytesIO()
+                img.save(out, format='JPEG', quality=quality, optimize=True)
+                return out.getvalue()
+        except Exception:
+            return image_bytes
 
     def complete_with_image(prompt: str, image_bytes: bytes) -> str:
-        image_b64 = base64.b64encode(image_bytes).decode('ascii')
+        compressed = _reencode_jpeg(image_bytes, jpeg_quality)
+        image_b64 = base64.b64encode(compressed).decode('ascii')
         response = client.chat.completions.create(
             model=model_name,
             temperature=temperature,
@@ -2103,9 +2140,29 @@ def cortex_llm_config_get():
                 'model_name': cfg.get('model_name', ''),
                 'temperature': cfg.get('temperature', 0.1),
                 'timeout': cfg.get('timeout', 30),
+                'vision_jpeg_quality': int(cfg.get('vision_jpeg_quality', 35)),
                 'node_exists_retries': cfg.get('node_exists_retries', 3),
                 'node_exists_interval_sec': cfg.get('node_exists_interval_sec', 0.6),
                 'touch_mode': cfg.get('touch_mode', 'shell_first'),
+                'map_filepath': cfg.get('map_filepath', ''),
+                'package_name': cfg.get('package_name', ''),
+                'reconnect_before_run': bool(cfg.get('reconnect_before_run', True)),
+                'use_llm_planner': bool(cfg.get('use_llm_planner', True)),
+                'route_recovery_enabled': bool(cfg.get('route_recovery_enabled', False)),
+                'max_route_restarts': int(cfg.get('max_route_restarts', 0)),
+                'use_vlm_takeover': bool(cfg.get('use_vlm_takeover', False)),
+                'fsm_max_turns': int(cfg.get('fsm_max_turns', 40)),
+                'fsm_max_commands_per_turn': int(cfg.get('fsm_max_commands_per_turn', 1)),
+                'fsm_max_vision_turns': int(cfg.get('fsm_max_vision_turns', 20)),
+                'fsm_action_interval_sec': float(cfg.get('fsm_action_interval_sec', 0.8)),
+                'fsm_screenshot_settle_sec': float(cfg.get('fsm_screenshot_settle_sec', 0.6)),
+                'fsm_tap_bind_clickable': bool(cfg.get('fsm_tap_bind_clickable', False)),
+                'fsm_tap_jitter_sigma_px': float(cfg.get('fsm_tap_jitter_sigma_px', 2.0)),
+                'fsm_swipe_jitter_sigma_px': float(cfg.get('fsm_swipe_jitter_sigma_px', 4.0)),
+                'fsm_swipe_duration_jitter_ratio': float(cfg.get('fsm_swipe_duration_jitter_ratio', 0.12)),
+                'fsm_xml_stable_interval_sec': float(cfg.get('fsm_xml_stable_interval_sec', 0.3)),
+                'fsm_xml_stable_samples': int(cfg.get('fsm_xml_stable_samples', 4)),
+                'fsm_xml_stable_timeout_sec': float(cfg.get('fsm_xml_stable_timeout_sec', 4.0)),
             }
         })
     except Exception as e:
@@ -2130,9 +2187,29 @@ def cortex_llm_config_set():
             'model_name': (data.get('model_name', current.get('model_name')) or '').strip(),
             'temperature': float(data.get('temperature', current.get('temperature', 0.1))),
             'timeout': int(data.get('timeout', current.get('timeout', 30))),
+            'vision_jpeg_quality': int(data.get('vision_jpeg_quality', current.get('vision_jpeg_quality', 35))),
             'node_exists_retries': int(data.get('node_exists_retries', current.get('node_exists_retries', 3))),
             'node_exists_interval_sec': float(data.get('node_exists_interval_sec', current.get('node_exists_interval_sec', 0.6))),
             'touch_mode': (data.get('touch_mode', current.get('touch_mode', 'shell_first')) or 'shell_first'),
+            'map_filepath': (data.get('map_filepath', current.get('map_filepath', '')) or '').strip(),
+            'package_name': (data.get('package_name', current.get('package_name', '')) or '').strip(),
+            'reconnect_before_run': bool(data.get('reconnect_before_run', current.get('reconnect_before_run', True))),
+            'use_llm_planner': bool(data.get('use_llm_planner', current.get('use_llm_planner', True))),
+            'route_recovery_enabled': bool(data.get('route_recovery_enabled', current.get('route_recovery_enabled', False))),
+            'max_route_restarts': int(data.get('max_route_restarts', current.get('max_route_restarts', 0))),
+            'use_vlm_takeover': bool(data.get('use_vlm_takeover', current.get('use_vlm_takeover', False))),
+            'fsm_max_turns': int(data.get('fsm_max_turns', current.get('fsm_max_turns', 40))),
+            'fsm_max_commands_per_turn': int(data.get('fsm_max_commands_per_turn', current.get('fsm_max_commands_per_turn', 1))),
+            'fsm_max_vision_turns': int(data.get('fsm_max_vision_turns', current.get('fsm_max_vision_turns', 20))),
+            'fsm_action_interval_sec': float(data.get('fsm_action_interval_sec', current.get('fsm_action_interval_sec', 0.8))),
+            'fsm_screenshot_settle_sec': float(data.get('fsm_screenshot_settle_sec', current.get('fsm_screenshot_settle_sec', 0.6))),
+            'fsm_tap_bind_clickable': bool(data.get('fsm_tap_bind_clickable', current.get('fsm_tap_bind_clickable', False))),
+            'fsm_tap_jitter_sigma_px': float(data.get('fsm_tap_jitter_sigma_px', current.get('fsm_tap_jitter_sigma_px', 2.0))),
+            'fsm_swipe_jitter_sigma_px': float(data.get('fsm_swipe_jitter_sigma_px', current.get('fsm_swipe_jitter_sigma_px', 4.0))),
+            'fsm_swipe_duration_jitter_ratio': float(data.get('fsm_swipe_duration_jitter_ratio', current.get('fsm_swipe_duration_jitter_ratio', 0.12))),
+            'fsm_xml_stable_interval_sec': float(data.get('fsm_xml_stable_interval_sec', current.get('fsm_xml_stable_interval_sec', 0.3))),
+            'fsm_xml_stable_samples': int(data.get('fsm_xml_stable_samples', current.get('fsm_xml_stable_samples', 4))),
+            'fsm_xml_stable_timeout_sec': float(data.get('fsm_xml_stable_timeout_sec', current.get('fsm_xml_stable_timeout_sec', 4.0))),
         }
         raw_key = data.get('api_key')
         if raw_key and raw_key != '***':
@@ -2367,6 +2444,11 @@ def _run_cortex_fsm_logic(data: dict, log_callback):
     touch_mode = str(data.get('touch_mode') or planner_cfg.get('touch_mode') or 'shell_first').strip()
     try:
         client.set_touch_mode(shell_first=(touch_mode != 'uiautomation_first'))
+    except Exception:
+        pass
+    screenshot_quality = int(data.get('vision_jpeg_quality') or planner_cfg.get('vision_jpeg_quality') or 35)
+    try:
+        client.set_screenshot_quality(screenshot_quality)
     except Exception:
         pass
 

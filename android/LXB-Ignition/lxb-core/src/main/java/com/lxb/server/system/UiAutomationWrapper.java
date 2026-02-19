@@ -1323,7 +1323,7 @@ public class UiAutomationWrapper {
     // =========================================================================
 
     // JPEG 压缩质量 (1-100)，50 通常能把 400KB PNG 压缩到 30-60KB
-    private int screenshotQuality = 50;
+    private int screenshotQuality = 35;
 
     /**
      * 设置截图质量
