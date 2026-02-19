@@ -1,5 +1,7 @@
 import json
+import io
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -35,6 +37,7 @@ class FSMConfig:
     xml_stable_interval_sec: float = 0.3
     xml_stable_samples: int = 4
     xml_stable_timeout_sec: float = 4.0
+    init_coord_probe_enabled: bool = True
 
 
 @dataclass
@@ -59,6 +62,7 @@ class CortexContext:
     same_command_streak: int = 0
     last_activity_sig: str = ""
     same_activity_streak: int = 0
+    coord_probe: Dict[str, Any] = field(default_factory=dict)
 
 
 class CommandPlanner(Protocol):
@@ -363,6 +367,12 @@ class CortexFSMEngine:
             except Exception:
                 context.app_candidates = []
 
+        # INIT coordinate probe: identify model coordinate space with a synthetic image.
+        probe_result = self._probe_coordinate_space(context)
+        if probe_result:
+            context.coord_probe = probe_result
+            context.output["coord_probe"] = probe_result
+
         self._log(
             context,
             "fsm",
@@ -371,6 +381,7 @@ class CortexFSMEngine:
             current_activity=context.current_activity,
             app_candidates=len(context.app_candidates),
             page_candidates=len(context.page_candidates),
+            coord_probe=context.coord_probe or None,
         )
         return CortexState.APP_RESOLVE
 
@@ -474,7 +485,7 @@ class CortexFSMEngine:
     def _exec_action_command(self, context: CortexContext, cmd: Instruction) -> bool:
         try:
             if cmd.op == "TAP":
-                x, y = int(cmd.args[0]), int(cmd.args[1])
+                x, y = self._map_point_by_probe(context, cmd.args[0], cmd.args[1])
                 if self.fsm_config.tap_bind_clickable:
                     tx, ty, bound = self._resolve_tap_clickable(context, x, y)
                     if bound:
@@ -494,7 +505,9 @@ class CortexFSMEngine:
                 self._wait_for_xml_stable(context, reason="tap")
                 return True
             if cmd.op == "SWIPE":
-                x1, y1, x2, y2, dur = [int(v) for v in cmd.args]
+                x1, y1 = self._map_point_by_probe(context, cmd.args[0], cmd.args[1])
+                x2, y2 = self._map_point_by_probe(context, cmd.args[2], cmd.args[3])
+                dur = int(cmd.args[4])
                 jx1, jy1 = self._apply_point_jitter(context, x1, y1, self.fsm_config.swipe_jitter_sigma_px)
                 jx2, jy2 = self._apply_point_jitter(context, x2, y2, self.fsm_config.swipe_jitter_sigma_px)
                 jdur = self._apply_duration_jitter(dur, self.fsm_config.swipe_duration_jitter_ratio)
@@ -765,6 +778,132 @@ class CortexFSMEngine:
             if action == "BACK":
                 return "BACK"
         return text
+
+    def _probe_coordinate_space(self, context: CortexContext) -> Dict[str, Any]:
+        if not bool(self.fsm_config.init_coord_probe_enabled):
+            return {}
+        if not hasattr(self.planner, "plan_vision"):
+            return {}
+        try:
+            probe_w, probe_h = 997, 1733
+            image_bytes = self._build_coord_probe_image(probe_w, probe_h)
+            prompt = (
+                "Coordinate Calibration Task.\n"
+                "You are given a synthetic image with black background and four colored corner markers:\n"
+                "- top-left: RED\n"
+                "- top-right: GREEN\n"
+                "- bottom-left: BLUE\n"
+                "- bottom-right: YELLOW\n"
+                "Return ONLY JSON with this exact schema:\n"
+                '{"tl":[x,y],"tr":[x,y],"bl":[x,y],"br":[x,y]}\n'
+                "Rules:\n"
+                "1) Output numbers only.\n"
+                "2) Do NOT add markdown.\n"
+                "3) Use your native coordinate space (do NOT convert on purpose).\n"
+                "4) Be precise; this is for coordinate range calibration.\n"
+            )
+            raw = self.planner.plan_vision(CortexState.VISION_ACT, prompt, context, image_bytes)
+            points = self._parse_coord_probe_response(raw)
+            if not points:
+                self._log(context, "fsm", "coord_probe_failed", reason="parse_failed", raw=(raw or "")[:400])
+                return {}
+
+            max_x = max(v[0] for v in points.values())
+            max_y = max(v[1] for v in points.values())
+            result = {
+                "max_x": round(max_x, 4),
+                "max_y": round(max_y, 4),
+                "points": points,
+                "probe_size": {"width": probe_w, "height": probe_h},
+            }
+            self._log(context, "fsm", "coord_probe_done", **result)
+            return result
+        except Exception as e:
+            self._log(context, "fsm", "coord_probe_failed", reason=str(e))
+            return {}
+
+    def _build_coord_probe_image(self, width: int, height: int) -> bytes:
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (int(width), int(height)), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        sz = max(40, min(width, height) // 8)
+        # TL red, TR green, BL blue, BR yellow
+        draw.rectangle([0, 0, sz, sz], fill=(255, 0, 0))
+        draw.rectangle([width - sz - 1, 0, width - 1, sz], fill=(0, 255, 0))
+        draw.rectangle([0, height - sz - 1, sz, height - 1], fill=(0, 100, 255))
+        draw.rectangle([width - sz - 1, height - sz - 1, width - 1, height - 1], fill=(255, 220, 0))
+
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+
+    def _parse_coord_probe_response(self, raw: str) -> Dict[str, tuple[float, float]]:
+        text = (raw or "").strip()
+        obj = None
+        try:
+            tmp = json.loads(text)
+            if isinstance(tmp, dict):
+                obj = tmp
+        except Exception:
+            m = re.search(r"\{[\s\S]*\}", text)
+            if m:
+                try:
+                    tmp = json.loads(m.group(0))
+                    if isinstance(tmp, dict):
+                        obj = tmp
+                except Exception:
+                    obj = None
+        if not isinstance(obj, dict):
+            return {}
+
+        out: Dict[str, tuple[float, float]] = {}
+        for k in ("tl", "tr", "bl", "br"):
+            v = obj.get(k)
+            if not isinstance(v, (list, tuple)) or len(v) < 2:
+                return {}
+            try:
+                x = float(v[0])
+                y = float(v[1])
+            except Exception:
+                return {}
+            out[k] = (x, y)
+        return out
+
+    def _map_point_by_probe(self, context: CortexContext, raw_x: str, raw_y: str) -> tuple[int, int]:
+        """
+        Map LLM point by INIT probe max range:
+        x_real = x_llm / max_x * (screen_w - 1)
+        y_real = y_llm / max_y * (screen_h - 1)
+        If probe data is missing/invalid, fallback to direct int parsing.
+        """
+        xf = float(raw_x)
+        yf = float(raw_y)
+
+        w = int(context.device_info.get("width") or 0)
+        h = int(context.device_info.get("height") or 0)
+        probe = context.coord_probe or {}
+        max_x = float(probe.get("max_x") or 0.0)
+        max_y = float(probe.get("max_y") or 0.0)
+        if w <= 1 or h <= 1 or max_x <= 0.0 or max_y <= 0.0:
+            return int(round(xf)), int(round(yf))
+
+        rx = int(round((xf / max_x) * float(w - 1)))
+        ry = int(round((yf / max_y) * float(h - 1)))
+        rx = max(0, min(w - 1, rx))
+        ry = max(0, min(h - 1, ry))
+        self._log(
+            context,
+            "exec",
+            "coord_scaled_by_probe",
+            raw_x=xf,
+            raw_y=yf,
+            max_x=max_x,
+            max_y=max_y,
+            x=rx,
+            y=ry,
+        )
+        return rx, ry
 
     def _log(self, context: CortexContext, stage: str, event: str, **kwargs: Any) -> None:
         payload = {
