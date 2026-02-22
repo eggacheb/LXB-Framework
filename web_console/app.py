@@ -159,6 +159,17 @@ def _task_is_cancel_requested(task_id: str) -> bool:
         return bool(t.get('cancel_requested'))
 
 
+def _ensure_connected(host: str, port: int) -> None:
+    """若当前无连接，自动连接并握手。"""
+    global client, connection_info
+    if client:
+        return
+    client = LXBLinkClient(host, port, timeout=2.0)
+    client.connect()
+    client.handshake()
+    connection_info = {'connected': True, 'host': host, 'port': port}
+
+
 def _prepare_link_for_task(reconnect: bool = True) -> None:
     """
     Recover link state after abrupt task interruption.
@@ -2726,10 +2737,17 @@ def _run_cortex_fsm_logic(data: dict, log_callback):
 @app.route('/api/cortex/fsm/run', methods=['POST'])
 def cortex_fsm_run():
     global client
+    data = request.json or {}
+    lxb_port = data.get('lxb_port')
+    if not client and lxb_port:
+        try:
+            _ensure_connected(request.remote_addr, int(lxb_port))
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'自动连接失败: {e}'}), 500
     if not client:
         return jsonify({'success': False, 'message': 'device not connected'}), 400
     try:
-        return jsonify(_run_cortex_fsm_logic(request.json or {}, log_callback=None))
+        return jsonify(_run_cortex_fsm_logic(data, log_callback=None))
     except Exception as e:
         import traceback
         return jsonify({'success': False, 'message': str(e), 'traceback': traceback.format_exc()}), 500
@@ -2738,10 +2756,15 @@ def cortex_fsm_run():
 @app.route('/api/cortex/fsm/start', methods=['POST'])
 def cortex_fsm_start():
     global client
+    data = request.json or {}
+    lxb_port = data.get('lxb_port')
+    if not client and lxb_port:
+        try:
+            _ensure_connected(request.remote_addr, int(lxb_port))
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'自动连接失败: {e}'}), 500
     if not client:
         return jsonify({'success': False, 'message': 'device not connected'}), 400
-
-    data = request.json or {}
     task_id = _task_create('cortex_fsm')
 
     def _runner():

@@ -105,14 +105,6 @@ class NodeLocator:
             prid = prid.strip().lower()
             if self._is_informative_resource_id(prid):
                 parts.append(f"pid:{prid}")
-        if self.bounds and len(self.bounds) >= 4:
-            x1, y1, x2, y2 = self.bounds
-            cx = (x1 + x2) // 2
-            cy = (y1 + y2) // 2
-            w = max(0, x2 - x1)
-            h = max(0, y2 - y1)
-            parts.append(f"grid:{cx//16}:{cy//16}")
-            parts.append(f"size:{w//16}:{h//16}")
 
         if not parts:
             return f"unknown:{id(self)}"
@@ -770,7 +762,7 @@ NAV|540|80|搜索|jump|search
 
             # Node 列表（显示待探索的任务）
             node_list = []
-            for task in list(self.pending_tasks)[:20]:  # 只显示前20个
+            for task in list(self.pending_tasks):
                 node_list.append({
                     "node_key": task.locator.unique_key(),
                     "name": task.name,
@@ -782,7 +774,7 @@ NAV|540|80|搜索|jump|search
                 })
 
             # 已探索的跳转
-            for trans in self.nav_map.transitions[-10:]:  # 最近10个
+            for trans in self.nav_map.transitions:
                 node_list.append({
                     "node_key": f"{trans.from_page}→{trans.to_page}",
                     "name": trans.node_name,

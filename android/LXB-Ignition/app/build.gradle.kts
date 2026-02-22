@@ -10,6 +10,13 @@ android {
         version = release(36)
     }
 
+    sourceSets {
+        getByName("main") {
+            assets.srcDirs("../lxb-core/build/libs")
+        }
+    }
+
+
     defaultConfig {
         applicationId = "com.example.lxb_ignition"
         minSdk = 30
@@ -38,6 +45,19 @@ android {
     }
     buildFeatures {
         compose = true
+        aidl = true
+        buildConfig = true
+    }
+
+    packaging {
+        resources.excludes += setOf(
+            "META-INF/LICENSE.md",
+            "META-INF/LICENSE-notice.md",
+            "META-INF/NOTICE.md",
+            "META-INF/NOTICE",
+            "META-INF/LICENSE",
+            "META-INF/*.kotlin_module"
+        )
     }
 }
 
@@ -52,10 +72,14 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(project(":lxb-core"))
 
-    // dadb - 本地 ADB 客户端
-    implementation("dev.mobile:dadb:1.2.7")
+    // ViewModel for Compose
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.1")
 
-    // OkHttp - 网络通信
+    // Shizuku - 特权 shell 执行
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+
+    // OkHttp - 发送需求到远端服务器
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     testImplementation(libs.junit)
@@ -65,4 +89,10 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+// 显式声明 assets 合并任务依赖 lxb-core:jar，避免 Gradle 任务顺序不确定
+afterEvaluate {
+    tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+        .configureEach { dependsOn(":lxb-core:jar") }
 }

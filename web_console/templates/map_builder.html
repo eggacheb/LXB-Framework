@@ -1752,23 +1752,17 @@
             // 待探索节点
             if (pending.length > 0) {
                 html += `<div style="color: #ffc107; font-size: 10px; margin-bottom: 4px; font-weight: 500;">⏳ 待探索</div>`;
-                pending.slice(0, 8).forEach((node, idx) => {
+                pending.forEach((node, idx) => {
                     html += renderNodeItemV5(node, idx, false);
                 });
-                if (pending.length > 8) {
-                    html += `<div style="text-align: center; color: #666; font-size: 9px; padding: 3px;">+${pending.length - 8} 更多</div>`;
-                }
             }
 
             // 已探索节点
             if (explored.length > 0) {
                 html += `<div style="color: #00d4aa; font-size: 10px; margin: 8px 0 4px 0; font-weight: 500;">✓ 已探索</div>`;
-                explored.slice(0, 10).forEach((node, idx) => {
+                explored.forEach((node, idx) => {
                     html += renderNodeItemV5(node, idx, true);
                 });
-                if (explored.length > 10) {
-                    html += `<div style="text-align: center; color: #666; font-size: 9px; padding: 3px;">+${explored.length - 10} 更多</div>`;
-                }
             }
 
             container.innerHTML = html;
