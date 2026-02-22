@@ -74,6 +74,10 @@
         </div>
 
         <div class="group">
+          <label>连接</label>
+          <select id="connSelect"></select>
+        </div>
+        <div class="group">
           <label>Map 文件</label>
           <select id="mapSelect"></select>
         </div>
@@ -145,6 +149,18 @@
           <div class="group"><label>Vision JPEG Q(10-95)</label><input id="visionJpegQuality" type="number" min="10" max="95" value="35" /></div>
         </div>
       </div>
+
+      <div class="card">
+        <h3>任务监控</h3>
+        <div class="btns">
+          <button class="btn-secondary" onclick="refreshTaskList()">刷新任务</button>
+          <button class="btn-secondary" onclick="loadTaskLogs()">查看日志</button>
+        </div>
+        <div class="group">
+          <label>任务列表</label>
+          <select id="taskSelect"></select>
+        </div>
+      </div>
     </div>
 
     <div class="center">
@@ -185,12 +201,37 @@
     let lastTap = null;
     let pendingMapPath = "";
     let feedRecords = [];
+    let knownTasks = [];
+    let taskMonitorToken = 0;
 
     async function jfetch(url, method = "GET", body = null) {
       const opt = { method, headers: { "Content-Type": "application/json" } };
       if (body !== null) opt.body = JSON.stringify(body);
       const r = await fetch(url, opt);
       return await r.json();
+    }
+
+    async function loadConnections() {
+      const data = await jfetch("/api/connections/list");
+      const sel = document.getElementById("connSelect");
+      sel.innerHTML = "";
+      const rows = (data && data.data) || [];
+      if (!rows.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "无可用连接";
+        sel.appendChild(opt);
+        return;
+      }
+      for (const c of rows) {
+        const opt = document.createElement("option");
+        opt.value = c.connection_id;
+        opt.textContent = `${c.host}:${c.port} | ${c.status} | tasks=${c.running_tasks || 0}`;
+        sel.appendChild(opt);
+      }
+      const current = data.current_connection_id || "";
+      if (current) sel.value = current;
+      if (!sel.value && rows.length) sel.value = rows[0].connection_id;
     }
 
     function _feedVisible(rec) {
@@ -289,6 +330,7 @@
 
     function collectConfig() {
       return {
+        connection_id: document.getElementById("connSelect").value || "",
         api_base_url: document.getElementById("llmApiUrl").value.trim(),
         api_key: document.getElementById("llmApiKey").value.trim(),
         model_name: document.getElementById("llmModel").value.trim(),
@@ -390,10 +432,10 @@
       }
     }
 
-    async function pollTask(taskId) {
-      let cursor = 0;
+    async function pollTask(taskId, token, cursor = 0) {
       currentTaskId = taskId;
       while (true) {
+        if (token !== taskMonitorToken) return;
         const p = await jfetch(`/api/cortex/task/${taskId}/poll?cursor=${cursor}`);
         if (!p.success) {
           feedPush("sys", "task/poll", p.message || "poll_failed", "other");
@@ -424,10 +466,60 @@
             document.getElementById("runStatus").textContent = "已终止";
           }
           currentTaskId = "";
+          await refreshTaskList();
           return;
         }
         await new Promise((res) => setTimeout(res, 400));
       }
+    }
+
+    function startTaskMonitor(taskId, resetFeed = false) {
+      if (!taskId) return;
+      taskMonitorToken += 1;
+      const token = taskMonitorToken;
+      if (resetFeed) clearFeed();
+      document.getElementById("runStatus").textContent = `监控中: ${taskId.slice(0, 8)}`;
+      pollTask(taskId, token, 0);
+    }
+
+    async function refreshTaskList() {
+      const connId = document.getElementById("connSelect").value || "";
+      const q = connId ? `?connection_id=${encodeURIComponent(connId)}` : "";
+      const r = await jfetch(`/api/tasks/list${q}`);
+      const sel = document.getElementById("taskSelect");
+      const prev = sel.value;
+      sel.innerHTML = "";
+      knownTasks = (r && r.data) || [];
+      if (!knownTasks.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "暂无任务";
+        sel.appendChild(opt);
+        return;
+      }
+      for (const t of knownTasks) {
+        const opt = document.createElement("option");
+        opt.value = t.task_id;
+        const brief = (t.user_task || "").slice(0, 18);
+        opt.textContent = `${t.status} | ${t.task_id.slice(0, 8)} | ${brief}`;
+        sel.appendChild(opt);
+      }
+      if (prev && knownTasks.some((x) => x.task_id === prev)) sel.value = prev;
+      else if (currentTaskId && knownTasks.some((x) => x.task_id === currentTaskId)) sel.value = currentTaskId;
+      const selected = knownTasks.find((x) => x.task_id === sel.value);
+      if (selected && selected.status === "running" && currentTaskId !== selected.task_id) {
+        startTaskMonitor(selected.task_id, false);
+      }
+    }
+
+    async function loadTaskLogs() {
+      const taskId = document.getElementById("taskSelect").value || "";
+      if (!taskId) {
+        feedPush("sys", "Task Logs", "请选择任务", "other");
+        return;
+      }
+      feedPush("sys", "Task Logs", `开始实时监控 task=${taskId}`, "other");
+      startTaskMonitor(taskId, true);
     }
 
     async function cancelTask() {
@@ -452,6 +544,7 @@
 
       const cfg = collectConfig();
       const payload = {
+        connection_id: cfg.connection_id,
         user_task: task,
         map_filepath: cfg.map_filepath,
         package_name: cfg.package_name,
@@ -488,7 +581,7 @@
         return;
       }
       feedPush("sys", "FSM Task", `task_id=${start.task_id}`, "fsm");
-      await pollTask(start.task_id);
+      startTaskMonitor(start.task_id, false);
     }
 
     window.addEventListener("resize", renderTapMarker);
@@ -497,8 +590,20 @@
         const el = document.getElementById(id);
         if (el) el.addEventListener("change", rerenderFeed);
       });
+      document.getElementById("connSelect").addEventListener("change", async () => {
+        await loadMaps();
+        await refreshTaskList();
+      });
+      document.getElementById("taskSelect").addEventListener("change", async () => {
+        const taskId = document.getElementById("taskSelect").value || "";
+        const task = knownTasks.find((x) => x.task_id === taskId);
+        if (task && task.status === "running") startTaskMonitor(taskId, true);
+      });
+      await loadConnections();
       await loadConfig();
       await loadScreenSize();
+      await refreshTaskList();
+      setInterval(refreshTaskList, 3000);
     })();
   </script>
 </body>

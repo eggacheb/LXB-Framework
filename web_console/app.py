@@ -12,7 +12,9 @@ import json
 import io
 import threading
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Dict, Optional
 
 # 尝试加载 python-dotenv (如果存在)
 try:
@@ -49,15 +51,144 @@ client = None
 connection_info = {
     'connected': False,
     'host': None,
-    'port': None
+    'port': None,
+    'connection_id': None,
+    'running_tasks': 0,
+    'total_connections': 0,
 }
 
 TASKS = {}
 TASKS_LOCK = threading.Lock()
+LOG_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'tasks'))
+
+CONNECTIONS: Dict[str, "ConnectionRecord"] = {}
+CONNECTIONS_LOCK = threading.RLock()
+CURRENT_CONNECTION_ID: Optional[str] = None
 
 CORTEX_LLM_CONFIG_FILE = os.path.abspath(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), '.cortex_llm_planner.json')
 )
+
+
+@dataclass
+class ConnectionRecord:
+    connection_id: str
+    host: str
+    port: int
+    source: str
+    client: LXBLinkClient
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_seen: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    status: str = "connected"
+    running_tasks: int = 0
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _connection_public(record: ConnectionRecord) -> dict:
+    return {
+        'connection_id': record.connection_id,
+        'host': record.host,
+        'port': record.port,
+        'source': record.source,
+        'status': record.status,
+        'created_at': record.created_at,
+        'last_seen': record.last_seen,
+        'running_tasks': int(record.running_tasks),
+    }
+
+
+def _sync_connection_info() -> None:
+    global client, connection_info
+    with CONNECTIONS_LOCK:
+        current = CONNECTIONS.get(CURRENT_CONNECTION_ID) if CURRENT_CONNECTION_ID else None
+        total_running = sum(int(c.running_tasks) for c in CONNECTIONS.values())
+        connection_info = {
+            'connected': bool(current and current.status == 'connected'),
+            'host': current.host if current else None,
+            'port': current.port if current else None,
+            'connection_id': current.connection_id if current else None,
+            'running_tasks': int(total_running),
+            'total_connections': len(CONNECTIONS),
+        }
+        client = current.client if current else None
+
+
+def _create_connection(host: str, port: int, source: str = 'manual', set_current: bool = True) -> ConnectionRecord:
+    global CURRENT_CONNECTION_ID
+    c = LXBLinkClient(host, port, timeout=2.0)
+    c.connect()
+    c.handshake()
+    record = ConnectionRecord(
+        connection_id=str(uuid.uuid4()),
+        host=str(host),
+        port=int(port),
+        source=source,
+        client=c,
+    )
+    with CONNECTIONS_LOCK:
+        CONNECTIONS[record.connection_id] = record
+        if set_current:
+            CURRENT_CONNECTION_ID = record.connection_id
+    _sync_connection_info()
+    return record
+
+
+def _find_connection_by_host_port(host: str, port: int) -> Optional[ConnectionRecord]:
+    with CONNECTIONS_LOCK:
+        for rec in CONNECTIONS.values():
+            if rec.host == str(host) and int(rec.port) == int(port) and rec.status == 'connected':
+                return rec
+    return None
+
+
+def _select_connection(connection_id: str) -> ConnectionRecord:
+    global CURRENT_CONNECTION_ID
+    with CONNECTIONS_LOCK:
+        rec = CONNECTIONS.get(connection_id)
+        if not rec:
+            raise RuntimeError('connection_not_found')
+        if rec.status != 'connected':
+            raise RuntimeError('connection_not_connected')
+        CURRENT_CONNECTION_ID = connection_id
+        rec.last_seen = _now_iso()
+    _sync_connection_info()
+    return rec
+
+
+def _get_connection(connection_id: Optional[str] = None, require: bool = True) -> Optional[ConnectionRecord]:
+    with CONNECTIONS_LOCK:
+        cid = connection_id or CURRENT_CONNECTION_ID
+        rec = CONNECTIONS.get(cid) if cid else None
+        if rec and rec.status == 'connected':
+            rec.last_seen = _now_iso()
+            return rec
+    if require:
+        raise RuntimeError('device not connected')
+    return None
+
+
+def _disconnect_connection(connection_id: Optional[str] = None) -> None:
+    global CURRENT_CONNECTION_ID
+    with CONNECTIONS_LOCK:
+        cid = connection_id or CURRENT_CONNECTION_ID
+        rec = CONNECTIONS.get(cid) if cid else None
+        if not rec:
+            return
+        try:
+            rec.client.disconnect()
+        except Exception:
+            pass
+        rec.status = 'disconnected'
+        rec.last_seen = _now_iso()
+        if cid in CONNECTIONS:
+            del CONNECTIONS[cid]
+        if CURRENT_CONNECTION_ID == cid:
+            CURRENT_CONNECTION_ID = next(iter(CONNECTIONS.keys()), None)
+    _sync_connection_info()
 
 
 def _default_cortex_llm_config() -> dict:
@@ -116,19 +247,26 @@ def _save_cortex_llm_config(config: dict) -> None:
         json.dump(current, f, ensure_ascii=False, indent=2)
 
 
-def _task_create(task_type: str) -> str:
+def _task_create(task_type: str, connection_id: str = '', user_task: str = '') -> str:
     task_id = str(uuid.uuid4())
     with TASKS_LOCK:
         TASKS[task_id] = {
             'task_id': task_id,
             'type': task_type,
             'created_at': datetime.now(timezone.utc).isoformat(),
+            'started_at': None,
+            'ended_at': None,
+            'status': 'created',
+            'connection_id': connection_id,
+            'user_task': user_task,
             'events': [],
             'done': False,
             'success': False,
             'result': None,
             'message': '',
             'cancel_requested': False,
+            'log_file': '',
+            'summary_file': '',
         }
     return task_id
 
@@ -137,10 +275,14 @@ def _task_append(task_id: str, event: dict) -> None:
     with TASKS_LOCK:
         t = TASKS.get(task_id)
         if t:
+            if not t.get('started_at'):
+                t['started_at'] = _now_iso()
+                t['status'] = 'running'
             t['events'].append(event)
 
 
 def _task_finish(task_id: str, success: bool, result: dict = None, message: str = '') -> None:
+    snapshot = None
     with TASKS_LOCK:
         t = TASKS.get(task_id)
         if not t:
@@ -149,6 +291,49 @@ def _task_finish(task_id: str, success: bool, result: dict = None, message: str 
         t['success'] = bool(success)
         t['result'] = result or {}
         t['message'] = message or ''
+        t['ended_at'] = _now_iso()
+        t['status'] = 'success' if success else ('cancelled' if message == 'task_cancelled' else 'failed')
+        snapshot = dict(t)
+    if snapshot:
+        _task_persist(snapshot)
+
+
+def _task_persist(task_snapshot: dict) -> None:
+    try:
+        created = task_snapshot.get('created_at') or _now_iso()
+        day = created.split('T', 1)[0] or 'unknown'
+        day_dir = os.path.join(LOG_ROOT, day)
+        os.makedirs(day_dir, exist_ok=True)
+        task_id = task_snapshot.get('task_id') or str(uuid.uuid4())
+        log_file = os.path.join(day_dir, f'{task_id}.jsonl')
+        summary_file = os.path.join(day_dir, f'{task_id}.summary.json')
+        with open(log_file, 'w', encoding='utf-8') as f:
+            for e in task_snapshot.get('events') or []:
+                f.write(json.dumps(e, ensure_ascii=False) + '\n')
+        summary_payload = {
+            'task_id': task_id,
+            'type': task_snapshot.get('type'),
+            'connection_id': task_snapshot.get('connection_id'),
+            'status': task_snapshot.get('status'),
+            'success': bool(task_snapshot.get('success')),
+            'message': task_snapshot.get('message') or '',
+            'user_task': task_snapshot.get('user_task') or '',
+            'created_at': task_snapshot.get('created_at'),
+            'started_at': task_snapshot.get('started_at'),
+            'ended_at': task_snapshot.get('ended_at'),
+            'event_count': len(task_snapshot.get('events') or []),
+            'result': task_snapshot.get('result') or {},
+            'log_file': log_file,
+        }
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary_payload, f, ensure_ascii=False, indent=2)
+        with TASKS_LOCK:
+            t = TASKS.get(task_id)
+            if t:
+                t['log_file'] = log_file
+                t['summary_file'] = summary_file
+    except Exception:
+        pass
 
 
 def _task_is_cancel_requested(task_id: str) -> bool:
@@ -160,30 +345,44 @@ def _task_is_cancel_requested(task_id: str) -> bool:
 
 
 def _ensure_connected(host: str, port: int) -> None:
-    """若当前无连接，自动连接并握手。"""
-    global client, connection_info
-    if client:
+    """Ensure at least one selected active connection."""
+    rec = _find_connection_by_host_port(host, int(port))
+    if rec:
+        _select_connection(rec.connection_id)
         return
-    client = LXBLinkClient(host, port, timeout=2.0)
-    client.connect()
-    client.handshake()
-    connection_info = {'connected': True, 'host': host, 'port': port}
+    _create_connection(host, int(port), source='mobile_auto', set_current=False)
 
 
-def _prepare_link_for_task(reconnect: bool = True) -> None:
+def _prepare_link_for_task(run_client, reconnect: bool = True) -> None:
     """
     Recover link state after abrupt task interruption.
     """
-    global client
-    if not client:
+    if not run_client:
         raise RuntimeError('device not connected')
     if reconnect:
-        client.reconnect(handshake=True)
+        run_client.reconnect(handshake=True)
     else:
         try:
-            client.reset_runtime_state(reset_seq=False)
+            run_client.reset_runtime_state(reset_seq=False)
         except Exception:
             pass
+
+
+def _resolve_run_connection(data: dict, allow_mobile_auto: bool = False) -> ConnectionRecord:
+    connection_id = str(data.get('connection_id') or '').strip()
+    if connection_id:
+        return _get_connection(connection_id=connection_id, require=True)
+
+    if allow_mobile_auto:
+        lxb_port = data.get('lxb_port')
+        if lxb_port:
+            host = request.remote_addr or ''
+            rec = _find_connection_by_host_port(host, int(lxb_port))
+            if rec:
+                return rec
+            return _create_connection(host, int(lxb_port), source='mobile_auto', set_current=False)
+
+    return _get_connection(connection_id=None, require=True)
 
 
 def _build_llm_complete(config: dict):
@@ -683,74 +882,89 @@ def cortex_route():
 
 @app.route('/api/connect', methods=['POST'])
 def connect():
-    """连接到设备"""
-    global client, connection_info
-
-    data = request.json
-    host = data.get('host', '192.168.1.100')  # 默认 WiFi 地址
-    port = data.get('port', 12345)
-
+    """兼容旧接口：创建连接并选为当前连接。"""
+    data = request.json or {}
+    host = (data.get('host') or '192.168.1.100').strip()
+    port = int(data.get('port') or 12345)
     try:
-        # 断开旧连接
-        if client:
-            try:
-                client.disconnect()
-            except:
-                pass
-
-        # 创建新连接
-        client = LXBLinkClient(host, port, timeout=2.0)
-        client.connect()
-
-        # 尝试握手
-        client.handshake()
-
-        connection_info = {
-            'connected': True,
-            'host': host,
-            'port': port
-        }
-
-        return jsonify({
-            'success': True,
-            'message': f'成功连接到 {host}:{port}'
-        })
-
+        existed = _find_connection_by_host_port(host, port)
+        if existed:
+            _select_connection(existed.connection_id)
+            return jsonify({'success': True, 'message': f'已切换到 {host}:{port}', 'connection': _connection_public(existed)})
+        rec = _create_connection(host, port, source='manual', set_current=True)
+        return jsonify({'success': True, 'message': f'成功连接到 {host}:{port}', 'connection': _connection_public(rec)})
     except Exception as e:
-        connection_info['connected'] = False
-        return jsonify({
-            'success': False,
-            'message': f'连接失败: {str(e)}'
-        }), 500
+        return jsonify({'success': False, 'message': f'连接失败: {str(e)}'}), 500
 
 
 @app.route('/api/disconnect', methods=['POST'])
 def disconnect():
-    """断开连接"""
-    global client, connection_info
-
+    """兼容旧接口：断开当前选中连接。"""
     try:
-        if client:
-            client.disconnect()
-            client = None
-
-        connection_info['connected'] = False
-
-        return jsonify({
-            'success': True,
-            'message': '已断开连接'
-        })
+        _disconnect_connection(None)
+        return jsonify({'success': True, 'message': '已断开连接'})
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'断开失败: {str(e)}'
-        }), 500
+        return jsonify({'success': False, 'message': f'断开失败: {str(e)}'}), 500
 
 
 @app.route('/api/status', methods=['GET'])
 def status():
-    """获取连接状态"""
-    return jsonify(connection_info)
+    """获取当前连接状态及连接汇总。"""
+    _sync_connection_info()
+    with CONNECTIONS_LOCK:
+        connections = [_connection_public(x) for x in CONNECTIONS.values()]
+    payload = dict(connection_info)
+    payload['connections'] = connections
+    return jsonify(payload)
+
+
+@app.route('/api/connections/create', methods=['POST'])
+def connections_create():
+    data = request.json or {}
+    host = (data.get('host') or '192.168.1.100').strip()
+    port = int(data.get('port') or 12345)
+    source = (data.get('source') or 'manual').strip() or 'manual'
+    set_current = bool(data.get('set_current', True))
+    try:
+        existed = _find_connection_by_host_port(host, port)
+        if existed:
+            if set_current:
+                _select_connection(existed.connection_id)
+            return jsonify({'success': True, 'connection': _connection_public(existed), 'reused': True})
+        rec = _create_connection(host, port, source=source, set_current=set_current)
+        return jsonify({'success': True, 'connection': _connection_public(rec)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/connections/list', methods=['GET'])
+def connections_list():
+    _sync_connection_info()
+    with CONNECTIONS_LOCK:
+        rows = [_connection_public(x) for x in CONNECTIONS.values()]
+    return jsonify({'success': True, 'current_connection_id': connection_info.get('connection_id'), 'data': rows})
+
+
+@app.route('/api/connections/select', methods=['POST'])
+def connections_select():
+    data = request.json or {}
+    connection_id = (data.get('connection_id') or '').strip()
+    if not connection_id:
+        return jsonify({'success': False, 'message': 'connection_id is required'}), 400
+    try:
+        rec = _select_connection(connection_id)
+        return jsonify({'success': True, 'connection': _connection_public(rec)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
+
+@app.route('/api/connections/<connection_id>/disconnect', methods=['POST'])
+def connections_disconnect(connection_id):
+    try:
+        _disconnect_connection(connection_id)
+        return jsonify({'success': True, 'connection_id': connection_id})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 # =============================================================================
@@ -2394,16 +2608,14 @@ def cortex_llm_test():
 @app.route('/api/cortex/route_then_act/run', methods=['POST'])
 def cortex_route_then_act_run():
     """Run route stage: resolve app -> target_page -> BFS -> device routing."""
-    global client
-
-    if not client:
-        return jsonify({'success': False, 'message': 'device not connected'}), 400
-
     try:
         from src.cortex import RouteThenActCortex, RouteConfig, MapPromptPlanner
 
         data = request.json or {}
-        _prepare_link_for_task(reconnect=bool(data.get('reconnect_before_run', True)))
+        conn = _resolve_run_connection(data, allow_mobile_auto=False)
+        run_client = conn.client
+        with conn.lock:
+            _prepare_link_for_task(run_client, reconnect=bool(data.get('reconnect_before_run', True)))
         user_task = (data.get('user_task') or '').strip()
         if not user_task:
             return jsonify({'success': False, 'message': 'user_task is required'}), 400
@@ -2430,7 +2642,8 @@ def cortex_route_then_act_run():
             selected_package = manual_package
 
             if not selected_package:
-                raw_apps = client.list_apps('user')
+                with conn.lock:
+                    raw_apps = run_client.list_apps('user')
                 installed_apps = _normalize_installed_apps(raw_apps)
                 map_ready_apps = [a for a in installed_apps if _has_map_for_package(base_dir, a.get('package', ''))]
                 app_resolution['candidate_count'] = len(map_ready_apps)
@@ -2503,17 +2716,18 @@ def cortex_route_then_act_run():
             logs.append(payload)
 
         engine = RouteThenActCortex(
-            client=client,
+            client=run_client,
             planner=planner,
             config=route_cfg,
             log_callback=log_callback,
         )
 
-        result = engine.run(
-            user_task=user_task,
-            map_path=map_path,
-            start_page=(data.get('start_page') or None),
-        )
+        with conn.lock:
+            result = engine.run(
+                user_task=user_task,
+                map_path=map_path,
+                start_page=(data.get('start_page') or None),
+            )
 
         plan_event = next((x for x in logs if x.get('event') == 'plan_ready'), {})
         route_steps = [
@@ -2543,6 +2757,7 @@ def cortex_route_then_act_run():
             'route_steps': route_steps,
             'result': result,
             'logs': logs,
+            'connection_id': conn.connection_id,
         })
     except Exception as e:
         import traceback
@@ -2553,11 +2768,10 @@ def cortex_route_then_act_run():
         }), 500
 
 
-def _run_cortex_fsm_logic(data: dict, log_callback):
-    global client
+def _run_cortex_fsm_logic(data: dict, log_callback, run_client):
     from src.cortex import CortexFSMEngine, FSMConfig, LLMPlanner, RouteConfig
 
-    _prepare_link_for_task(reconnect=bool(data.get('reconnect_before_run', True)))
+    _prepare_link_for_task(run_client, reconnect=bool(data.get('reconnect_before_run', True)))
 
     user_task = (data.get('user_task') or '').strip()
     if not user_task:
@@ -2585,19 +2799,19 @@ def _run_cortex_fsm_logic(data: dict, log_callback):
     # Apply touch mode preference for this run.
     touch_mode = str(data.get('touch_mode') or planner_cfg.get('touch_mode') or 'shell_first').strip()
     try:
-        client.set_touch_mode(shell_first=(touch_mode != 'uiautomation_first'))
+        run_client.set_touch_mode(shell_first=(touch_mode != 'uiautomation_first'))
     except Exception:
         pass
     screenshot_quality = int(data.get('vision_jpeg_quality') or planner_cfg.get('vision_jpeg_quality') or 35)
     try:
-        client.set_screenshot_quality(screenshot_quality)
+        run_client.set_screenshot_quality(screenshot_quality)
     except Exception:
         pass
 
     app_candidates_for_fsm = []
     installed_apps = []
     try:
-        installed_apps = _normalize_installed_apps(client.list_apps('user'))
+        installed_apps = _normalize_installed_apps(run_client.list_apps('user'))
     except Exception:
         installed_apps = []
 
@@ -2697,7 +2911,7 @@ def _run_cortex_fsm_logic(data: dict, log_callback):
             log_callback(payload)
 
     engine = CortexFSMEngine(
-        client=client,
+        client=run_client,
         planner=planner,
         route_config=route_cfg,
         fsm_config=fsm_cfg,
@@ -2736,18 +2950,13 @@ def _run_cortex_fsm_logic(data: dict, log_callback):
 
 @app.route('/api/cortex/fsm/run', methods=['POST'])
 def cortex_fsm_run():
-    global client
     data = request.json or {}
-    lxb_port = data.get('lxb_port')
-    if not client and lxb_port:
-        try:
-            _ensure_connected(request.remote_addr, int(lxb_port))
-        except Exception as e:
-            return jsonify({'success': False, 'message': f'自动连接失败: {e}'}), 500
-    if not client:
-        return jsonify({'success': False, 'message': 'device not connected'}), 400
     try:
-        return jsonify(_run_cortex_fsm_logic(data, log_callback=None))
+        conn = _resolve_run_connection(data, allow_mobile_auto=True)
+        with conn.lock:
+            payload = _run_cortex_fsm_logic(data, log_callback=None, run_client=conn.client)
+        payload['connection_id'] = conn.connection_id
+        return jsonify(payload)
     except Exception as e:
         import traceback
         return jsonify({'success': False, 'message': str(e), 'traceback': traceback.format_exc()}), 500
@@ -2755,17 +2964,17 @@ def cortex_fsm_run():
 
 @app.route('/api/cortex/fsm/start', methods=['POST'])
 def cortex_fsm_start():
-    global client
     data = request.json or {}
-    lxb_port = data.get('lxb_port')
-    if not client and lxb_port:
-        try:
-            _ensure_connected(request.remote_addr, int(lxb_port))
-        except Exception as e:
-            return jsonify({'success': False, 'message': f'自动连接失败: {e}'}), 500
-    if not client:
-        return jsonify({'success': False, 'message': 'device not connected'}), 400
-    task_id = _task_create('cortex_fsm')
+    try:
+        conn = _resolve_run_connection(data, allow_mobile_auto=True)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    task_id = _task_create('cortex_fsm', connection_id=conn.connection_id, user_task=(data.get('user_task') or '').strip())
+    with CONNECTIONS_LOCK:
+        rec = CONNECTIONS.get(conn.connection_id)
+        if rec:
+            rec.running_tasks += 1
+    _sync_connection_info()
 
     def _runner():
         try:
@@ -2774,16 +2983,24 @@ def cortex_fsm_start():
                     raise RuntimeError('task_cancelled')
                 _task_append(task_id, e)
 
-            payload = _run_cortex_fsm_logic(data, log_callback=_log_with_cancel)
+            with conn.lock:
+                payload = _run_cortex_fsm_logic(data, log_callback=_log_with_cancel, run_client=conn.client)
+            payload['connection_id'] = conn.connection_id
             if _task_is_cancel_requested(task_id):
                 _task_finish(task_id, False, payload, 'task_cancelled')
                 return
             _task_finish(task_id, bool(payload.get('success')), payload, payload.get('message') or '')
         except Exception as e:
             _task_finish(task_id, False, {'success': False, 'message': str(e)}, str(e))
+        finally:
+            with CONNECTIONS_LOCK:
+                rec = CONNECTIONS.get(conn.connection_id)
+                if rec and rec.running_tasks > 0:
+                    rec.running_tasks -= 1
+            _sync_connection_info()
 
     threading.Thread(target=_runner, daemon=True).start()
-    return jsonify({'success': True, 'task_id': task_id})
+    return jsonify({'success': True, 'task_id': task_id, 'connection_id': conn.connection_id})
 
 
 @app.route('/api/cortex/task/<task_id>/poll', methods=['GET'])
@@ -2798,6 +3015,11 @@ def cortex_task_poll(task_id):
         return jsonify({
             'success': True,
             'task_id': task_id,
+            'connection_id': t.get('connection_id', ''),
+            'status': t.get('status', 'created'),
+            'created_at': t.get('created_at'),
+            'started_at': t.get('started_at'),
+            'ended_at': t.get('ended_at'),
             'events': events,
             'next_cursor': next_cursor,
             'done': bool(t['done']),
@@ -2805,6 +3027,7 @@ def cortex_task_poll(task_id):
             'cancel_requested': bool(t.get('cancel_requested')),
             'result': t['result'] if t['done'] else None,
             'message': t['message'] if t['done'] else '',
+            'log_file': t.get('log_file', ''),
         })
 
 
@@ -2818,6 +3041,62 @@ def cortex_task_cancel(task_id):
             return jsonify({'success': True, 'message': 'task_already_done'})
         t['cancel_requested'] = True
     return jsonify({'success': True, 'message': 'cancel_requested', 'task_id': task_id})
+
+
+@app.route('/api/tasks/list', methods=['GET'])
+def tasks_list():
+    connection_id = (request.args.get('connection_id') or '').strip()
+    status_filter = (request.args.get('status') or '').strip().lower()
+    with TASKS_LOCK:
+        rows = []
+        for t in TASKS.values():
+            if connection_id and t.get('connection_id') != connection_id:
+                continue
+            st = (t.get('status') or '').lower()
+            if status_filter and st != status_filter:
+                continue
+            rows.append({
+                'task_id': t.get('task_id'),
+                'type': t.get('type'),
+                'connection_id': t.get('connection_id'),
+                'status': t.get('status'),
+                'success': bool(t.get('success')),
+                'done': bool(t.get('done')),
+                'message': t.get('message') or '',
+                'user_task': t.get('user_task') or '',
+                'created_at': t.get('created_at'),
+                'started_at': t.get('started_at'),
+                'ended_at': t.get('ended_at'),
+                'event_count': len(t.get('events') or []),
+                'log_file': t.get('log_file') or '',
+            })
+    rows.sort(key=lambda x: x.get('created_at') or '', reverse=True)
+    running = sum(1 for x in rows if x.get('status') == 'running')
+    return jsonify({'success': True, 'running': running, 'count': len(rows), 'data': rows})
+
+
+@app.route('/api/tasks/<task_id>/logs', methods=['GET'])
+def task_logs(task_id):
+    with TASKS_LOCK:
+        t = TASKS.get(task_id)
+        if not t:
+            return jsonify({'success': False, 'message': 'task_not_found'}), 404
+        log_file = t.get('log_file') or ''
+        in_memory_events = list(t.get('events') or [])
+    if log_file and os.path.exists(log_file):
+        events = []
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    events.append(json.loads(line))
+        except Exception:
+            events = in_memory_events
+    else:
+        events = in_memory_events
+    return jsonify({'success': True, 'task_id': task_id, 'log_file': log_file, 'events': events})
 
 
 def _pick_latest_map_file(base_dir: str, package_name: str = None) -> str:

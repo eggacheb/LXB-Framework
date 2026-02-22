@@ -168,6 +168,7 @@ examples/screenshot*.png
 
 # Log files
 *.log
+/logs/
 
 # Local configuration
 local_config.py
