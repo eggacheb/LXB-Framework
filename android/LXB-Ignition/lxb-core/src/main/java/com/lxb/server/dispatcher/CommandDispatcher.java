@@ -4,6 +4,7 @@ import com.lxb.server.daemon.CircuitBreaker;
 import com.lxb.server.daemon.SequenceTracker;
 import com.lxb.server.execution.ExecutionEngine;
 import com.lxb.server.perception.PerceptionEngine;
+import com.lxb.server.protocol.CommandIds;
 import com.lxb.server.protocol.FrameCodec;
 
 import java.util.LinkedHashMap;
@@ -60,7 +61,7 @@ public class CommandDispatcher {
                 return cached;
             }
             // Defensive fallback for duplicate-without-cache:
-            return buildAck(frame.seq, (byte) 0x02, new byte[0]);
+            return buildAck(frame.seq, CommandIds.CMD_ACK, new byte[0]);
         }
 
         // 2) Circuit breaker
@@ -74,77 +75,77 @@ public class CommandDispatcher {
         try {
             switch (frame.cmd) {
                 // Link Layer
-                case 0x01:  // CMD_HANDSHAKE
+                case CommandIds.CMD_HANDSHAKE:
                     response = handleHandshake();
                     break;
-                case 0x03:  // CMD_HEARTBEAT
+                case CommandIds.CMD_HEARTBEAT:
                     response = new byte[]{0x01};
                     break;
 
                 // Input Layer
-                case 0x10:  // CMD_TAP
+                case CommandIds.CMD_TAP:
                     response = executionEngine.handleTap(payload);
                     break;
-                case 0x11:  // CMD_SWIPE
+                case CommandIds.CMD_SWIPE:
                     response = executionEngine.handleSwipe(payload);
                     break;
-                case 0x12:  // CMD_LONG_PRESS
+                case CommandIds.CMD_LONG_PRESS:
                     response = executionEngine.handleLongPress(payload);
                     break;
-                case 0x1B:  // CMD_UNLOCK
+                case CommandIds.CMD_UNLOCK:
                     response = executionEngine.handleUnlock(payload);
                     break;
-                case 0x1C:  // CMD_SET_TOUCH_MODE
+                case CommandIds.CMD_SET_TOUCH_MODE:
                     response = executionEngine.handleSetTouchMode(payload);
                     break;
-                case 0x1D:  // CMD_SET_SCREENSHOT_QUALITY
+                case CommandIds.CMD_SET_SCREENSHOT_QUALITY:
                     response = executionEngine.handleSetScreenshotQuality(payload);
                     break;
 
                 // Input Extension
-                case 0x20:  // CMD_INPUT_TEXT
+                case CommandIds.CMD_INPUT_TEXT:
                     response = executionEngine.handleInputText(payload);
                     break;
-                case 0x21:  // CMD_KEY_EVENT
+                case CommandIds.CMD_KEY_EVENT:
                     response = executionEngine.handleKeyEvent(payload);
                     break;
 
                 // Sense Layer
-                case 0x30:  // CMD_GET_ACTIVITY
+                case CommandIds.CMD_GET_ACTIVITY:
                     response = perceptionEngine.handleGetActivity();
                     break;
-                case 0x31:  // CMD_DUMP_HIERARCHY
+                case CommandIds.CMD_DUMP_HIERARCHY:
                     response = perceptionEngine.handleDumpHierarchy(payload);
                     break;
-                case 0x32:  // CMD_FIND_NODE
+                case CommandIds.CMD_FIND_NODE:
                     response = perceptionEngine.handleFindNode(payload);
                     break;
-                case 0x33:  // CMD_DUMP_ACTIONS
+                case CommandIds.CMD_DUMP_ACTIONS:
                     response = perceptionEngine.handleDumpActions(payload);
                     break;
-                case 0x36:  // CMD_GET_SCREEN_STATE
+                case CommandIds.CMD_GET_SCREEN_STATE:
                     response = perceptionEngine.handleGetScreenState();
                     break;
-                case 0x37:  // CMD_GET_SCREEN_SIZE
+                case CommandIds.CMD_GET_SCREEN_SIZE:
                     response = perceptionEngine.handleGetScreenSize();
                     break;
-                case 0x39:  // CMD_FIND_NODE_COMPOUND
+                case CommandIds.CMD_FIND_NODE_COMPOUND:
                     response = perceptionEngine.handleFindNodeCompound(payload);
                     break;
 
                 // Lifecycle Layer
-                case 0x43:  // CMD_LAUNCH_APP
+                case CommandIds.CMD_LAUNCH_APP:
                     response = executionEngine.handleLaunchApp(payload);
                     break;
-                case 0x44:  // CMD_STOP_APP
+                case CommandIds.CMD_STOP_APP:
                     response = executionEngine.handleStopApp(payload);
                     break;
-                case 0x48:  // CMD_LIST_APPS
+                case CommandIds.CMD_LIST_APPS:
                     response = executionEngine.handleListApps(payload);
                     break;
 
                 // Media Layer
-                case 0x60:  // CMD_SCREENSHOT
+                case CommandIds.CMD_SCREENSHOT:
                     response = perceptionEngine.handleScreenshot();
                     break;
 
@@ -155,7 +156,7 @@ public class CommandDispatcher {
             }
 
             // 4) Build ACK and cache by frame fingerprint
-            byte[] ack = buildAck(frame.seq, (byte) 0x02, response);
+            byte[] ack = buildAck(frame.seq, CommandIds.CMD_ACK, response);
             ackCache.put(frameKey, ack);
             return ack;
 
@@ -173,7 +174,7 @@ public class CommandDispatcher {
     }
 
     private byte[] buildErrorAck(int seq, byte status) {
-        return FrameCodec.encode(seq, (byte) 0x02, new byte[]{status});
+        return FrameCodec.encode(seq, CommandIds.CMD_ACK, new byte[]{status});
     }
 
     private byte[] handleHandshake() {
