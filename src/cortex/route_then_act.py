@@ -1,3 +1,38 @@
+"""
+LXB-Cortex Route-Then-Act Engine
+
+This module implements the "Route-Then-Act" pattern for Android automation.
+The routing phase navigates through the UI hierarchy deterministically to reach
+a target page, then hands off to an action engine for task execution.
+
+The routing strategy uses BFS pathfinding through a navigation map, with
+XML-first locator resolution to minimize coordinate dependencies. When routing
+fails, it can recover using VLM-based popup detection and dismissal.
+
+Key Components:
+- Locator: UI element identifier for navigation nodes
+- RouteEdge: Transition between pages with trigger locator
+- RouteMap: Complete navigation graph for an app
+- RoutePlan: Target page specification
+- RouteThenActCortex: Main routing engine with BFS execution
+
+Example:
+    >>> from lxb_link import LXBLinkClient
+    >>> from cortex.route_then_act import RouteThenActCortex, FixedPlanPlanner
+    >>>
+    >>> client = LXBLinkClient('192.168.1.100', 12345)
+    >>> client.connect()
+    >>>
+    >>> planner = FixedPlanPlanner("com.example.app", "settings")
+    >>> engine = RouteThenActCortex(client, planner=planner)
+    >>> result = engine.run(
+    ...     user_task="Open settings",
+    ...     map_path="maps/com.example.app.json"
+    ... )
+    >>> print(result["status"])
+    'success'
+"""
+
 import json
 import time
 import uuid
@@ -13,6 +48,20 @@ except ImportError:
 
 @dataclass
 class Locator:
+    """UI element identifier for finding navigation nodes.
+
+    Locators are used to identify clickable elements that trigger page
+    transitions. The routing engine uses multiple attributes to improve
+    match reliability.
+
+    Attributes:
+        resource_id: Android resource ID (e.g., "com.app:id/button")
+        text: Visible text content of the element
+        content_desc: Content description for accessibility
+        class_name: Fully qualified class name (e.g., "android.widget.Button")
+        parent_rid: Resource ID of parent element for disambiguation
+        bounds_hint: Optional screen bounds hint [left, top, right, bottom]
+    """
     resource_id: Optional[str] = None
     text: Optional[str] = None
     content_desc: Optional[str] = None
@@ -23,6 +72,19 @@ class Locator:
 
 @dataclass
 class RouteEdge:
+    """Represents a navigational transition between two pages.
+
+    A route edge defines how to navigate from one page to another by
+    specifying which UI element to tap.
+
+    Attributes:
+        from_page: Source page ID
+        to_page: Destination page ID
+        locator: UI element to tap for this transition
+        description: Human-readable description of the transition
+        legacy_from: Deprecated source page ID for backward compatibility
+        legacy_to: Deprecated destination page ID for backward compatibility
+    """
     from_page: str
     to_page: str
     locator: Locator
@@ -33,6 +95,19 @@ class RouteEdge:
 
 @dataclass
 class RouteMap:
+    """Complete navigation map for an Android application.
+
+    A route map defines the navigation graph of an app, including all pages,
+    transitions between them, and special handlers for popups and blocking states.
+
+    Attributes:
+        package: Android package name (e.g., "com.example.app")
+        pages: Dict mapping page IDs to page metadata (name, features, aliases, etc.)
+        transitions: List of RouteEdges defining navigational paths
+        popups: List of popup definitions with close locators for automatic handling
+        blocks: List of block states (e.g., loading screens) to detect
+        metadata: Additional metadata including page_id mappings
+    """
     package: str
     pages: Dict[str, Dict[str, Any]]
     transitions: List[RouteEdge]
@@ -43,12 +118,33 @@ class RouteMap:
 
 @dataclass
 class RoutePlan:
+    """Target specification for routing.
+
+    Defines which app and page the routing engine should navigate to.
+
+    Attributes:
+        package_name: Target app package name
+        target_page: Target page ID to reach
+    """
     package_name: str
     target_page: str
 
 
 @dataclass
 class RouteConfig:
+    """Configuration parameters for the Route-Then-Act engine.
+
+    Attributes:
+        node_exists_retries: Number of retries to confirm a node exists (default: 3)
+        node_exists_interval_sec: Delay between retries in seconds (default: 0.6)
+        max_route_restarts: Maximum app restarts when routing fails (default: 3)
+        use_vlm_takeover: Whether to use VLM for popup recovery (default: True)
+        vlm_takeover_timeout_sec: Timeout for VLM popup classification (default: 15.0)
+        route_recovery_enabled: Whether to enable route recovery attempts (default: True)
+        locator_score_threshold: Minimum score for locator match (default: 45.0)
+        locator_ambiguity_delta: Required score delta to avoid ambiguity (default: 8.0)
+        hint_distance_limit_px: Max distance for hint-based matching in pixels (default: 520.0)
+    """
     node_exists_retries: int = 3
     node_exists_interval_sec: float = 0.6
     max_route_restarts: int = 3
@@ -61,22 +157,71 @@ class RouteConfig:
 
 
 class MapTaskPlanner(Protocol):
+    """Protocol for task planning strategies.
+
+    A MapTaskPlanner analyzes a user task and route map to determine
+    which target page the routing engine should navigate to.
+    """
     def plan(self, user_task: str, route_map: RouteMap) -> RoutePlan:
+        """Plan the target page for a given user task.
+
+        Args:
+            user_task: Natural language description of the user's goal
+            route_map: Navigation map for the target app
+
+        Returns:
+            RoutePlan specifying the package and target page
+        """
         ...
 
 
 class VLMActionEngine(Protocol):
+    """Protocol for VLM-based action execution.
+
+    A VLMActionEngine takes over after routing completes to perform
+    visual task execution using vision-language model guidance.
+    """
     def execute(self, user_task: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the user task using VLM guidance.
+
+        Args:
+            user_task: Natural language description of the task
+            context: Execution context with task_id, package_name, target_page, route_trace
+
+        Returns:
+            Dict containing execution results (status, output, etc.)
+        """
         ...
 
 
 class HeuristicPlanner:
-    """
-    Minimal planner fallback.
-    If no external LLM planner is injected, this planner tries to map task text to page id.
+    """Minimal planner fallback using keyword matching.
+
+    If no external LLM planner is injected, this planner tries to map
+    task text to page ID using simple keyword matching against page IDs,
+    aliases, names, and legacy IDs.
+
+    Attributes:
+        No explicit attributes, uses static analysis of route map
     """
 
     def plan(self, user_task: str, route_map: RouteMap) -> RoutePlan:
+        """Plan target page by matching task keywords against page metadata.
+
+        Matching strategy (in order):
+        1. Direct page ID match in task text
+        2. Legacy page ID match
+        3. Alias match
+        4. Page name match
+        5. Fallback to inferred home page
+
+        Args:
+            user_task: Natural language description of the task
+            route_map: Navigation map for the target app
+
+        Returns:
+            RoutePlan with matched or fallback target page
+        """
         task = (user_task or "").lower()
         pages = route_map.pages
 
@@ -100,27 +245,71 @@ class HeuristicPlanner:
 
 
 class FixedPlanPlanner:
-    """Always return a fixed package + target page plan."""
+    """Planner that always returns a predetermined package and target page.
+
+    This planner is useful when the target page is already known and
+    no LLM analysis is needed.
+
+    Attributes:
+        package_name: Fixed package name to return
+        target_page: Fixed target page ID to return
+    """
 
     def __init__(self, package_name: str, target_page: str):
+        """Initialize the fixed planner.
+
+        Args:
+            package_name: Package name to always return
+            target_page: Target page ID to always return
+        """
         self.package_name = package_name
         self.target_page = target_page
 
     def plan(self, user_task: str, route_map: RouteMap) -> RoutePlan:
+        """Return the fixed package and target page.
+
+        Args:
+            user_task: Ignored (kept for protocol compatibility)
+            route_map: Fallback for package name if package_name not set
+
+        Returns:
+            RoutePlan with the predetermined package and target page
+        """
         return RoutePlan(self.package_name or route_map.package, self.target_page)
 
 
 class MapPromptPlanner:
-    """
-    Planner adapter: map + task -> LLM JSON -> RoutePlan.
-    If parse fails, automatically falls back to HeuristicPlanner.
+    """LLM-based planner with heuristic fallback.
+
+    This planner sends the route map and user task to an LLM to determine
+    the target page. If the LLM response cannot be parsed, it automatically
+    falls back to HeuristicPlanner.
+
+    Attributes:
+        _llm_complete: Function that takes a prompt and returns LLM response
+        _fallback: HeuristicPlanner instance for fallback behavior
     """
 
     def __init__(self, llm_complete: Callable[[str], str]):
+        """Initialize the LLM-based planner.
+
+        Args:
+            llm_complete: Function that takes a prompt string and returns
+                LLM response (should be JSON with package_name and target_page)
+        """
         self._llm_complete = llm_complete
         self._fallback = HeuristicPlanner()
 
     def plan(self, user_task: str, route_map: RouteMap) -> RoutePlan:
+        """Plan target page using LLM analysis with heuristic fallback.
+
+        Args:
+            user_task: Natural language description of the task
+            route_map: Navigation map for the target app
+
+        Returns:
+            RoutePlan with LLM-chosen or fallback target page
+        """
         prompt = self._build_prompt(user_task, route_map)
         try:
             raw = self._llm_complete(prompt)
@@ -134,6 +323,18 @@ class MapPromptPlanner:
         return self._fallback.plan(user_task, route_map)
 
     def _build_prompt(self, user_task: str, route_map: RouteMap) -> str:
+        """Build the LLM prompt for route planning.
+
+        Creates a structured prompt with the user task and route map,
+        instructing the LLM to return JSON with package_name and target_page.
+
+        Args:
+            user_task: Natural language description of the task
+            route_map: Navigation map for the target app
+
+        Returns:
+            Formatted prompt string for LLM completion
+        """
         edge_rows = []
         for edge in route_map.transitions:
             edge_rows.append(
@@ -177,11 +378,34 @@ class MapPromptPlanner:
 
 
 class RouteThenActCortex:
-    """
-    Route-Then-Act engine:
-    1) Planner resolves package + target_page
-    2) Route engine runs BFS node-click chain
-    3) On target page, handoff to VLM action engine
+    """Route-Then-Act engine for deterministic UI navigation.
+
+    This engine implements the routing phase of the Route-Then-Act pattern:
+    1. Planner resolves package + target_page from user task
+    2. BFS pathfinding finds shortest route through navigation graph
+    3. Execute route by tapping locators along the path
+    4. On target page, handoff to VLM action engine for task execution
+
+    The engine supports recovery from route failures through:
+    - Known popup detection and dismissal
+    - VLM-based popup classification
+    - App restart and retry
+
+    Example:
+        >>> from lxb_link import LXBLinkClient
+        >>> from cortex.route_then_act import RouteThenActCortex, FixedPlanPlanner
+        >>>
+        >>> client = LXBLinkClient('192.168.1.100', 12345)
+        >>> client.connect()
+        >>>
+        >>> planner = FixedPlanPlanner("com.example.app", "settings")
+        >>> engine = RouteThenActCortex(client, planner=planner)
+        >>> result = engine.run(
+        ...     user_task="Open settings",
+        ...     map_path="maps/com.example.app.json"
+        ... )
+        >>> print(result["status"])
+        'success'
     """
 
     def __init__(
@@ -192,6 +416,17 @@ class RouteThenActCortex:
         config: Optional[RouteConfig] = None,
         log_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
+        """Initialize the Route-Then-Act engine.
+
+        Args:
+            client: LXBLinkClient instance for device communication
+            planner: Optional MapTaskPlanner for target page selection.
+                Defaults to HeuristicPlanner.
+            action_engine: Optional VLMActionEngine for task execution after routing.
+                If None, routing completes without action execution.
+            config: Optional RouteConfig for engine behavior tuning
+            log_callback: Optional callback for logging events
+        """
         self.client = client
         self.config = config or RouteConfig()
         self.planner = planner or HeuristicPlanner()
@@ -206,6 +441,29 @@ class RouteThenActCortex:
         map_path: str,
         start_page: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Execute the Route-Then-Act workflow.
+
+        This method:
+        1. Loads the route map from the specified path
+        2. Uses the planner to determine the target page
+        3. Finds a BFS path from start_page to target_page
+        4. Executes the route by tapping locators
+        5. Optionally hands off to action_engine for task execution
+
+        Args:
+            user_task: Natural language description of the task
+            map_path: Path to the route map JSON file
+            start_page: Optional starting page ID. If None, infers home page.
+
+        Returns:
+            Dict containing execution results:
+                - status: "success" or "failed"
+                - reason: Failure reason if status is "failed"
+                - target_page: Target page that was routed to
+                - route_trace: List of step descriptions executed
+                - route_only: True if no action_engine was provided
+                - vlm_result: Action engine result if provided
+        """
         self._task_id = str(uuid.uuid4())
         route_map = self._load_map(map_path)
 
@@ -250,6 +508,14 @@ class RouteThenActCortex:
     # Map + Planner
     # ----------------------------
     def _load_map(self, map_path: str) -> RouteMap:
+        """Load a route map from a JSON file.
+
+        Args:
+            map_path: Path to the route map JSON file
+
+        Returns:
+            RouteMap with parsed transitions, pages, popups, and blocks
+        """
         with open(map_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
@@ -288,6 +554,18 @@ class RouteThenActCortex:
         )
 
     def _resolve_target_page(self, route_map: RouteMap, target_page: str) -> str:
+        """Resolve a target page reference to a valid page ID.
+
+        Handles various input formats including direct page IDs, legacy IDs,
+        aliases, and home-like references.
+
+        Args:
+            route_map: Navigation map for the app
+            target_page: Target page reference to resolve
+
+        Returns:
+            Valid page ID from the route map
+        """
         requested = (target_page or "").strip()
         requested_norm = requested.lower()
 
@@ -328,6 +606,16 @@ class RouteThenActCortex:
         target_page: str,
         start_page: Optional[str] = None,
     ) -> Optional[List[RouteEdge]]:
+        """Find shortest path from start page to target page using BFS.
+
+        Args:
+            route_map: Navigation map for the app
+            target_page: Destination page ID
+            start_page: Optional starting page ID. If None, infers home page.
+
+        Returns:
+            List of RouteEdges forming the shortest path, or None if no path exists
+        """
         start = start_page or _infer_home_page(route_map.pages, route_map.transitions)
         if start == target_page:
             return []
@@ -350,6 +638,19 @@ class RouteThenActCortex:
         return None
 
     def _execute_route(self, route_map: RouteMap, path: List[RouteEdge]) -> Tuple[bool, List[str]]:
+        """Execute a route by tapping locators along the path.
+
+        Launches the app and iterates through each edge in the path,
+        tapping the locator to navigate to the next page.
+
+        Args:
+            route_map: Navigation map for the app
+            path: List of RouteEdges to execute
+
+        Returns:
+            Tuple of (success, route_trace) where success is True if all
+            steps completed, and route_trace is a list of step descriptions
+        """
         self.client.launch_app(route_map.package, clear_task=True)
         time.sleep(1.5)
 
@@ -421,6 +722,20 @@ class RouteThenActCortex:
     # Deviation handling
     # ----------------------------
     def _handle_route_deviation(self, route_map: RouteMap, edge: RouteEdge) -> str:
+        """Handle route deviation when a node is missing or tap fails.
+
+        Attempts recovery through:
+        1. Scanning for known interrupts (popups, blocks)
+        2. VLM-based popup detection and dismissal
+        3. Returns "resume" if recovery succeeded, "restart" if app restart needed
+
+        Args:
+            route_map: Navigation map for the app
+            edge: The route edge that failed
+
+        Returns:
+            "resume" if routing can continue, "restart" if app needs restart
+        """
         # 1) known interrupt scan
         if self._scan_known_interrupts(route_map):
             self._log("route", "route_resume", result="ok", reason="known_interrupt_cleared")
@@ -459,6 +774,21 @@ class RouteThenActCortex:
         return "restart"
 
     def _vlm_classify_interrupt(self, screenshot: bytes) -> Tuple[str, Dict[str, Any]]:
+        """Classify the current screen state using VLM.
+
+        Determines if the screen shows a popup/ad that should be dismissed,
+        a normal app page, or an unknown state.
+
+        Args:
+            screenshot: Screenshot image bytes
+
+        Returns:
+            Tuple of (kind, payload) where:
+                - kind is "popup", "normal", or "unknown"
+                - For "popup": payload contains {"x": int, "y": int, "reason": str}
+                - For "normal": payload contains {"reason": str}
+                - For "unknown": payload is empty dict
+        """
         """
         Returns:
             ("popup", {"x": int, "y": int, "reason": str})
@@ -494,6 +824,19 @@ class RouteThenActCortex:
     # Known interrupt scan
     # ----------------------------
     def _scan_known_interrupts(self, route_map: RouteMap) -> bool:
+        """Scan for and handle known interrupts from the route map.
+
+        Checks for:
+        1. Known popups - attempts to close them using defined close locators
+        2. Known blocks - checks if current screen matches a blocked state
+
+        Args:
+            route_map: Navigation map with popup and block definitions
+
+        Returns:
+            True if a popup was closed and routing should resume,
+            False if no interrupt was handled or a block was detected
+        """
         xml_nodes = self._dump_actions()
         if not xml_nodes:
             return False
@@ -539,6 +882,14 @@ class RouteThenActCortex:
     # Node resolve/tap
     # ----------------------------
     def _node_exists(self, locator: Locator) -> bool:
+        """Check if a locator exists on the current screen with retries.
+
+        Args:
+            locator: Locator to search for
+
+        Returns:
+            True if the locator is found, False otherwise
+        """
         for attempt in range(self.config.node_exists_retries):
             bounds = self._resolve_locator_bounds(locator)
             if bounds:
@@ -549,6 +900,14 @@ class RouteThenActCortex:
         return False
 
     def _tap_locator(self, locator: Locator) -> bool:
+        """Tap a locator's center point on the screen.
+
+        Args:
+            locator: Locator to tap
+
+        Returns:
+            True if tap was executed, False if locator could not be resolved
+        """
         bounds = self._resolve_locator_bounds(locator)
         if bounds:
             x, y = _bounds_center(bounds)
@@ -564,6 +923,20 @@ class RouteThenActCortex:
         return False
 
     def _resolve_locator_bounds(self, locator: Locator) -> Optional[Tuple[int, int, int, int]]:
+        """Resolve a locator to screen bounds using multiple strategies.
+
+        Resolution strategy (in order):
+        1. XML-first matching against dump_actions() output
+        2. Compound find_node with strict conditions
+        3. Compound find_node with relaxed conditions (no text)
+        4. Single-field find_node queries
+
+        Args:
+            locator: Locator to resolve
+
+        Returns:
+            Screen bounds as (left, top, right, bottom) tuple, or None if not found
+        """
         # XML-first resolve to avoid false positives from non-unique find_node matches.
         bounds = self._resolve_locator_from_xml(locator)
         if bounds:
@@ -605,6 +978,23 @@ class RouteThenActCortex:
         return None
 
     def _resolve_locator_from_xml(self, locator: Locator) -> Optional[Tuple[int, int, int, int]]:
+        """Resolve a locator using XML dump with scoring.
+
+        Scores nodes based on:
+        - Resource ID match (+65)
+        - Text match (+38 exact, +24 partial, -12 miss)
+        - Content description match (+30 exact, +16 partial, -8 miss)
+        - Class match (+16, -6 miss)
+        - IoU with hint (+44 * iou)
+        - Distance to hint center
+
+        Args:
+            locator: Locator to resolve
+
+        Returns:
+            Screen bounds as (left, top, right, bottom) tuple, or None if
+            no node meets the score threshold
+        """
         nodes = self._dump_actions()
         if not nodes:
             return None
@@ -734,12 +1124,22 @@ class RouteThenActCortex:
     # Low-level data
     # ----------------------------
     def _dump_actions(self) -> List[Dict[str, Any]]:
+        """Dump the current UI hierarchy as action nodes.
+
+        Returns:
+            List of node dicts from dump_actions(), or empty list on error
+        """
         try:
             return self.client.dump_actions().get("nodes", [])
         except Exception:
             return []
 
     def _screenshot(self) -> Optional[bytes]:
+        """Capture a screenshot from the device.
+
+        Returns:
+            Screenshot image bytes, or None if capture failed
+        """
         try:
             return self.client.request_screenshot()
         except Exception:
@@ -749,6 +1149,13 @@ class RouteThenActCortex:
     # Logging
     # ----------------------------
     def _log(self, stage: str, event: str, **kwargs):
+        """Log an event with timestamp and task context.
+
+        Args:
+            stage: Stage identifier (e.g., "route", "vlm")
+            event: Event name within the stage
+            **kwargs: Additional event-specific data to log
+        """
         payload = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "task_id": self._task_id,
@@ -763,6 +1170,21 @@ class RouteThenActCortex:
 
 
 def _infer_home_page(pages: Dict[str, Dict[str, Any]], transitions: List[RouteEdge]) -> str:
+    """Infer the home page ID from the route map.
+
+    Inference strategy:
+    1. Look for page with legacy_page_id == "home"
+    2. Look for page_id starting with "home__"
+    3. Find pages with zero in-degree (no incoming edges)
+    4. Fallback to first page in pages dict
+
+    Args:
+        pages: Dict mapping page IDs to page metadata
+        transitions: List of route edges for graph analysis
+
+    Returns:
+        Inferred home page ID
+    """
     for page_id, page in pages.items():
         if page.get("legacy_page_id") == "home":
             return page_id
@@ -781,6 +1203,16 @@ def _infer_home_page(pages: Dict[str, Dict[str, Any]], transitions: List[RouteEd
 
 
 def _compound_conditions(locator: Locator, include_text: bool) -> List[Tuple[int, int, str]]:
+    """Build compound find_node conditions from a locator.
+
+    Args:
+        locator: Locator to convert to conditions
+        include_text: Whether to include text/content_desc in conditions
+
+    Returns:
+        List of (field, operator, value) tuples for find_node_compound.
+        Field codes: 0=TEXT, 1=RESOURCE_ID, 2=CONTENT_DESC, 3=CLASS_NAME, 4=PARENT_RESOURCE_ID
+    """
     conds: List[Tuple[int, int, str]] = []
     # field: 0=TEXT, 1=RESOURCE_ID, 2=CONTENT_DESC, 3=CLASS_NAME, 4=PARENT_RESOURCE_ID
     if locator.resource_id:
@@ -797,6 +1229,15 @@ def _compound_conditions(locator: Locator, include_text: bool) -> List[Tuple[int
 
 
 def _single_queries(locator: Locator) -> List[Tuple[int, str]]:
+    """Build single-field find_node queries from a locator.
+
+    Args:
+        locator: Locator to convert to queries
+
+    Returns:
+        List of (match_type, query) tuples. Match types:
+        3=MATCH_RESOURCE_ID, 0=MATCH_EXACT_TEXT, 5=MATCH_DESCRIPTION
+    """
     # 3=MATCH_RESOURCE_ID, 0=MATCH_EXACT_TEXT, 5=MATCH_DESCRIPTION
     out: List[Tuple[int, str]] = []
     if locator.resource_id:
@@ -809,6 +1250,14 @@ def _single_queries(locator: Locator) -> List[Tuple[int, str]]:
 
 
 def _normalize_bounds(raw_candidates: Any) -> List[Tuple[int, int, int, int]]:
+    """Normalize raw candidate bounds to valid tuples.
+
+    Args:
+        raw_candidates: Raw bounds data from find_node results
+
+    Returns:
+        List of valid (left, top, right, bottom) tuples with right > left and bottom > top
+    """
     out: List[Tuple[int, int, int, int]] = []
     for item in raw_candidates or []:
         if not isinstance(item, (list, tuple)) or len(item) < 4:
@@ -823,14 +1272,39 @@ def _normalize_bounds(raw_candidates: Any) -> List[Tuple[int, int, int, int]]:
 
 
 def _bounds_center(bounds: Tuple[int, int, int, int]) -> Tuple[int, int]:
+    """Calculate the center point of a bounds rectangle.
+
+    Args:
+        bounds: (left, top, right, bottom) tuple
+
+    Returns:
+        (center_x, center_y) tuple
+    """
     return ((bounds[0] + bounds[2]) // 2, (bounds[1] + bounds[3]) // 2)
 
 
 def _bounds_area(bounds: Tuple[int, int, int, int]) -> int:
+    """Calculate the area of a bounds rectangle.
+
+    Args:
+        bounds: (left, top, right, bottom) tuple
+
+    Returns:
+        Area in square pixels
+    """
     return max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1])
 
 
 def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    """Calculate Intersection over Union (IoU) of two bounding boxes.
+
+    Args:
+        a: First bounds tuple (left, top, right, bottom)
+        b: Second bounds tuple (left, top, right, bottom)
+
+    Returns:
+        IoU value between 0.0 and 1.0
+    """
     x1 = max(a[0], b[0])
     y1 = max(a[1], b[1])
     x2 = min(a[2], b[2])
@@ -848,6 +1322,20 @@ def _pick_best_bounds(
     hint: Optional[Tuple[int, int, int, int]],
     raw_candidates: Any,
 ) -> Optional[Tuple[int, int, int, int]]:
+    """Select the best matching bounds from candidates.
+
+    Scoring considers:
+    - IoU with hint bounds
+    - Distance from hint center
+    - Area ratio difference
+
+    Args:
+        hint: Optional hint bounds for reference
+        raw_candidates: Raw bounds candidates from find_node
+
+    Returns:
+        Best matching bounds tuple, or None if no candidates
+    """
     candidates = _normalize_bounds(raw_candidates)
     if not candidates:
         return None
@@ -869,6 +1357,14 @@ def _pick_best_bounds(
 
 
 def _node_bounds(node: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+    """Extract valid bounds from a node dict.
+
+    Args:
+        node: Node dict from dump_actions containing "bounds" key
+
+    Returns:
+        (left, top, right, bottom) tuple, or None if invalid
+    """
     raw = node.get("bounds")
     if not isinstance(raw, (list, tuple)) or len(raw) < 4:
         return None
@@ -882,18 +1378,42 @@ def _node_bounds(node: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
 
 
 def _tail(value: Optional[str]) -> str:
+    """Extract the tail component from a resource ID string.
+
+    Args:
+        value: Resource ID like "com.app:id/button"
+
+    Returns:
+        Tail component like "button" in lowercase, or empty string
+    """
     if not value:
         return ""
     return str(value).split("/")[-1].strip().lower()
 
 
 def _class_leaf(value: Optional[str]) -> str:
+    """Extract the leaf class name from a fully qualified class name.
+
+    Args:
+        value: Class name like "android.widget.Button"
+
+    Returns:
+        Leaf class name like "button" in lowercase, or empty string
+    """
     if not value:
         return ""
     return str(value).split(".")[-1].strip().lower()
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
+    """Extract a JSON object from text, handling various formats.
+
+    Args:
+        text: Text potentially containing JSON
+
+    Returns:
+        Parsed dict, or empty dict if parsing fails
+    """
     text = (text or "").strip()
     if not text:
         return {}

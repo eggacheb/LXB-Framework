@@ -1,13 +1,28 @@
 """
-LXB Auto Map Builder v2 - XML-VLM 融合引擎
+LXB Auto Map Builder - XML-VLM Fusion Engine
 
-以 VLM 检测结果为主，通过 IoU 匹配找到对应的 XML 节点，
-获取 resource_id 等属性用于后续自动化操作。
+This module provides fusion capabilities for combining VLM (Vision-Language Model)
+detections with XML hierarchy data to create robust UI element mappings.
 
-核心思路：
-1. VLM 识别重要的可交互元素（过滤掉重复列表项等）
-2. 根据 VLM 坐标找对应的 XML node
-3. 找到就记录 resource_id 等属性，找不到就忽略
+The fusion process takes VLM-detected UI elements and matches them against XML nodes
+from the Android UI hierarchy, combining the semantic understanding of VLM with the
+precise attributes (resource_id, clickable, etc.) from XML.
+
+Core Strategy:
+1. VLM identifies important interactive elements (filtering out repetitive list items)
+2. Match VLM detections to XML nodes using IoU (Intersection over Union)
+3. Extract resource_id and other attributes from matched XML nodes
+4. Create FusedNode objects combining both data sources
+
+Example:
+    >>> from auto_map_builder.fusion_engine import FusionEngine, parse_xml_nodes
+    >>>
+    >>> engine = FusionEngine(iou_threshold=0.3)
+    >>> xml_nodes = parse_xml_nodes(client.dump_actions()["nodes"])
+    >>> vlm_result = vlm_engine.analyze_page(screenshot)
+    >>> fused = engine.fuse(xml_nodes, vlm_result)
+    >>> for node in fused:
+    ...     print(f"{node.vlm_label}: {node.resource_id}")
 """
 
 from typing import List, Tuple, Optional, Dict
@@ -18,19 +33,42 @@ from .models import XMLNode, FusedNode, VLMDetection, VLMPageResult, BBox
 
 @dataclass
 class MatchResult:
-    """匹配结果"""
+    """Result of matching a VLM detection to an XML node.
+
+    Attributes:
+        vlm_idx: Index of the VLM detection in the original list
+        xml_idx: Index of the matched XML node in the original list
+        iou_score: Intersection over Union score (0.0 to 1.0)
+    """
     vlm_idx: int
     xml_idx: int
     iou_score: float
 
 
 class FusionEngine:
-    """XML-VLM 融合引擎 - 以 VLM 为主"""
+    """XML-VLM fusion engine for combining VLM detections with XML hierarchy data.
+
+    The fusion process is VLM-driven: each VLM detection is matched to the best
+    corresponding XML node using IoU thresholding. Matched pairs are merged into
+    FusedNode objects containing both VLM semantic labels and XML attributes.
+
+    Attributes:
+        iou_threshold: Minimum IoU score for valid matches (default: 0.3)
+        stats: Dictionary tracking fusion statistics
+
+    Example:
+        >>> engine = FusionEngine(iou_threshold=0.4)
+        >>> fused_nodes = engine.fuse(xml_nodes, vlm_result)
+        >>> print(engine.get_stats())
+        {'total_vlm_detections': 15, 'matched_count': 12, 'match_rate': 0.8}
+    """
 
     def __init__(self, iou_threshold: float = 0.3):
-        """
+        """Initialize the fusion engine.
+
         Args:
-            iou_threshold: IoU 匹配阈值，低于此值视为不匹配
+            iou_threshold: Minimum IoU score for a valid match (default: 0.3).
+                Detections with IoU below this threshold are considered unmatched.
         """
         self.iou_threshold = iou_threshold
 
@@ -43,7 +81,15 @@ class FusionEngine:
         }
 
     def compute_iou(self, box1: BBox, box2: BBox) -> float:
-        """计算两个边界框的 IoU"""
+        """Calculate Intersection over Union (IoU) of two bounding boxes.
+
+        Args:
+            box1: First bounding box as (x1, y1, x2, y2) tuple
+            box2: Second bounding box as (x1, y1, x2, y2) tuple
+
+        Returns:
+            IoU value between 0.0 (no overlap) and 1.0 (perfect overlap)
+        """
         x1 = max(box1[0], box2[0])
         y1 = max(box1[1], box2[1])
         x2 = min(box1[2], box2[2])
@@ -65,16 +111,19 @@ class FusionEngine:
         xml_nodes: List[XMLNode],
         used_xml: set
     ) -> Optional[Tuple[int, float]]:
-        """
-        为一个 VLM 检测框找到最佳匹配的 XML 节点
+        """Find the best matching XML node for a VLM detection bounding box.
+
+        Searches through all available XML nodes (excluding already used ones)
+        and returns the one with the highest IoU score above the threshold.
 
         Args:
-            vlm_bbox: VLM 检测框
-            xml_nodes: XML 节点列表
-            used_xml: 已使用的 XML 节点索引集合
+            vlm_bbox: VLM detection bounding box (x1, y1, x2, y2)
+            xml_nodes: List of XML nodes to search through
+            used_xml: Set of XML node indices that are already matched
 
         Returns:
-            (xml_idx, iou_score) 或 None
+            Tuple of (xml_idx, iou_score) for the best match, or None if
+            no match exceeds the IoU threshold
         """
         best_idx = -1
         best_iou = 0.0
@@ -97,21 +146,31 @@ class FusionEngine:
         xml_nodes: List[XMLNode],
         vlm_result: VLMPageResult
     ) -> List[FusedNode]:
-        """
-        执行 VLM 主导的融合
+        """Execute VLM-driven fusion of UI element data.
 
-        策略：
-        1. 遍历每个 VLM 检测结果
-        2. 为每个 VLM 检测找最佳匹配的 XML 节点
-        3. 找到匹配：创建融合节点，包含 XML 的 resource_id 等属性
-        4. 找不到匹配：忽略该 VLM 检测（可能是误检或纯视觉元素）
+        This method implements the core fusion algorithm:
+        1. Iterate through each VLM detection
+        2. Find the best matching XML node using IoU
+        3. If match found: Create FusedNode with combined attributes from both sources
+        4. If no match: Skip the VLM detection (may be false positive or visual-only element)
+
+        The VLM-first approach means the fusion is driven by what the VLM detects
+        as important/interactive elements, with XML providing the precise attributes
+        needed for automation (resource_id, clickable, etc.).
 
         Args:
-            xml_nodes: XML UI 节点列表
-            vlm_result: VLM 推理结果
+            xml_nodes: List of XML UI nodes from dump_hierarchy/dump_actions
+            vlm_result: VLM analysis result with detections and OCR text
 
         Returns:
-            融合节点列表（只包含成功匹配的）
+            List of FusedNode objects containing combined VLM and XML data.
+            Only includes nodes that successfully matched to an XML node.
+
+        Example:
+            >>> engine = FusionEngine(iou_threshold=0.3)
+            >>> fused = engine.fuse(xml_nodes, vlm_result)
+            >>> for node in fused:
+            ...     print(f"{node.vlm_label} -> {node.resource_id} (IoU: {node.iou_score:.2f})")
         """
         vlm_detections = vlm_result.detections
 
@@ -156,7 +215,16 @@ class FusionEngine:
         return fused_nodes
 
     def get_stats(self) -> Dict:
-        """获取统计信息"""
+        """Get fusion statistics including match rate.
+
+        Returns:
+            Dict containing:
+                - total_vlm_detections: Total VLM detections processed
+                - total_xml_nodes: Total XML nodes searched
+                - matched_count: Number of successful matches
+                - unmatched_vlm: Number of VLM detections with no match
+                - match_rate: Ratio of matched to total detections (0.0 to 1.0)
+        """
         stats = self.stats.copy()
         if stats["total_vlm_detections"] > 0:
             stats["match_rate"] = stats["matched_count"] / stats["total_vlm_detections"]
@@ -165,7 +233,10 @@ class FusionEngine:
         return stats
 
     def reset_stats(self):
-        """重置统计信息"""
+        """Reset all fusion statistics to zero.
+
+        Useful for starting a new measurement period.
+        """
         self.stats = {
             "total_vlm_detections": 0,
             "total_xml_nodes": 0,
@@ -175,14 +246,22 @@ class FusionEngine:
 
 
 def parse_xml_nodes(raw_nodes: List[Dict]) -> List[XMLNode]:
-    """
-    将 dump_actions 返回的原始节点数据转换为 XMLNode 对象
+    """Convert raw node data from dump_actions into XMLNode objects.
+
+    Processes the raw dictionary output from dump_actions and creates
+    typed XMLNode objects with proper bounds conversion.
 
     Args:
-        raw_nodes: dump_actions 返回的节点列表
+        raw_nodes: List of node dictionaries from client.dump_actions()["nodes"]
 
     Returns:
-        XMLNode 对象列表
+        List of XMLNode objects. Nodes with invalid bounds are skipped.
+
+    Example:
+        >>> raw = client.dump_actions()["nodes"]
+        >>> xml_nodes = parse_xml_nodes(raw)
+        >>> for node in xml_nodes:
+        ...     print(f"{node.node_id}: {node.resource_id or node.text}")
     """
     xml_nodes: List[XMLNode] = []
 

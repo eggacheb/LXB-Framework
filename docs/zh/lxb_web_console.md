@@ -1,50 +1,169 @@
-﻿# LXB-WebConsole
+# LXB-WebConsole
 
 ## 1. Scope
-`LXB-WebConsole` 是统一 Web 调试入口，承载连接管理、命令调试、建图、地图查看与 Cortex 执行。
+LXB-WebConsole 是统一的 Web 调试入口，提供连接管理、命令调试、地图构建、地图查看和 Cortex 执行的界面。
 
 ## 2. Architecture
-- 后端：`web_console/app.py`（Flask）
-- 前端模板：`web_console/templates/*.html`
-- 前端脚本：`web_console/static/js/main.js`
+代码目录：`web_console/`
+
+```
+web_console/
+├── app.py                 # Flask 后端服务
+├── templates/             # HTML 模板
+│   ├── index.html         # 连接状态页
+│   ├── command_studio.html
+│   ├── map_builder.html
+│   ├── map_viewer.html
+│   └── cortex_route.html
+└── static/
+    └── js/
+        └── main.js        # 前端交互逻辑
+```
+
+### 模块关系
+
+```
+Web Browser (用户界面)
+       │
+       v
+Flask Backend (app.py)
+       │
+       ├──> LXB-Link (设备通信)
+       ├──> LXB-Cortex (自动化执行)
+       └──> LXB-MapBuilder (地图构建)
+```
 
 ## 3. Core Flow
-1. 用户在壳页面建立设备连接。
-2. 在子页面执行对应任务：命令调试、建图、路由执行。
-3. 前端调用 `/api/*`，后端驱动 `LXB-Link` 与业务模块。
-4. 结果以日志、状态和图结构回显。
 
-## 4. Key Interfaces & Data Shapes
-- 页面：`/`, `/command_studio`, `/map_builder`, `/map_viewer`, `/cortex_route`
-- API 分组：
-  - 连接：`/api/connect`, `/api/disconnect`, `/api/status`
-  - 命令：`/api/command/*`
-  - 建图：`/api/explore/*`, `/api/maps/*`
-  - Cortex：`/api/cortex/*`
+### 3.1 连接管理流程
 
-## 5. Failure Modes & Recovery
-- 连接失败：目标设备不可达、会话断开。
-- 执行失败：命令超时、返回码异常。
-- 建图/路由失败：模块内部异常或状态中断。
+```
+用户输入设备信息 (IP + 端口)
+       │
+       v
+创建 LXBLinkClient 实例
+       │
+       v
+握手验证 (handshake)
+       │
+       v
+获取设备信息并显示
+```
 
-## 6. Observability
-- 控制台日志按模块与阶段输出。
-- 支持任务轮询、运行状态与增量日志读取。
+### 3.2 命令调试流程
 
-## 7. Configuration
-- 连接参数：`host`, `port`
-- Cortex 配置：LLM 参数、FSM 参数
-- MapBuilder 配置：探索深度、时延、输出目录
+```
+用户选择命令类型 (TAP/SWIPE/INPUT/...)
+       │
+       v
+前端表单填充参数
+       │
+       v
+POST /api/command/execute
+       │
+       v
+后端执行命令
+       │
+       v
+前端显示结果
+```
 
-## 8. Constraints & Compatibility
-- 路由路径保持历史兼容（本轮不改 API 路由）。
-- 页面展示命名统一为 LXB 模块风格。
+### 3.3 地图构建流程
 
-## 9. Current Gaps
-- 页面与后端配置项较多，仍需持续分层与精简。
-- 大任务日志在长会话下需要更强的筛选策略。
+```
+用户配置建图参数
+       │
+       v
+启动 NodeMapBuilder
+       │
+       v
+实时进度推送
+       │
+       v
+前端更新 UI (进度、截图、节点)
+       │
+       v
+完成并保存地图 JSON
+```
 
-## 10. Cross References
-- `docs/zh/lxb_link.md`
-- `docs/zh/lxb_map_builder.md`
-- `docs/zh/lxb_cortex.md`
+### 3.4 Cortex 执行流程
+
+```
+用户输入任务描述
+       │
+       v
+选择或上传地图
+       │
+       v
+创建 CortexFSMEngine
+       │
+       v
+实时日志推送 (FSM 状态、路由轨迹)
+       │
+       v
+前端可视化展示
+```
+
+## 4. Key Interfaces
+
+### 4.1 主要页面
+
+| 页面 | 路由 | 功能 |
+|------|------|------|
+| 连接状态 | `/` | 设备连接、状态显示 |
+| 命令调试 | `/command_studio` | 发送命令、查看结果 |
+| 地图构建 | `/map_builder` | 自动建图、进度监控 |
+| 地图查看 | `/map_viewer` | 地图可视化、编辑 |
+| 路由执行 | `/cortex_route` | 任务提交、执行监控 |
+
+### 4.2 API 分类
+
+**设备连接 API**
+- `/api/device/connect` - 连接设备
+- `/api/device/disconnect` - 断开连接
+- `/api/device/status` - 获取状态
+
+**命令执行 API**
+- `/api/command/tap` - 点击
+- `/api/command/swipe` - 滑动
+- `/api/command/input_text` - 输入文本
+
+**地图构建 API**
+- `/api/explore/start` - 开始建图
+- `/api/explore/progress` - 获取进度
+- `/api/maps/list` - 列出地图
+
+**Cortex 执行 API**
+- `/api/cortex/submit` - 提交任务
+- `/api/cortex/status/{task_id}` - 获取状态
+- `/api/cortex/logs/{task_id}` - 获取日志
+
+## 5. Design Principles
+
+### 5.1 统一入口
+- 所有功能集成在一个 Web 界面
+- 统一的导航栏和状态显示
+- 一致的用户体验
+
+### 5.2 实时反馈
+- 轮询机制获取任务进度
+- 实时显示截图和日志
+- 可视化状态机流转
+
+### 5.3 模块解耦
+- 前端通过 HTTP API 与后端通信
+- 后端调用各模块核心功能
+- 模块间独立，易于维护
+
+## 6. Code Structure
+
+| 文件 | 职责 | 关键内容 |
+|------|------|----------|
+| `app.py` | Flask 后端服务 | API 路由、设备管理 |
+| `main.js` | 前端交互逻辑 | DOM 操作、AJAX 请求 |
+| `templates/*.html` | 页面模板 | 各功能页面 UI |
+
+## 7. Cross References
+- `docs/zh/lxb_link.md` - 设备通信
+- `docs/zh/lxb_map_builder.md` - 地图构建
+- `docs/zh/lxb_cortex.md` - 自动化执行

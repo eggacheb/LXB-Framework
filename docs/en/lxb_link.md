@@ -1,49 +1,104 @@
-﻿# LXB-Link
+# LXB-Link
 
 ## 1. Scope
-`LXB-Link` is the PC-to-Android protocol client layer. It provides reliable command transport and a unified high-level API.
+LXB-Link is the PC-side to Android-side protocol client layer, responsible for reliably sending commands and receiving responses.
 
 ## 2. Architecture
-- Client entry: `src/lxb_link/client.py`
-- Transport: `src/lxb_link/transport.py`
-- Protocol codec: `src/lxb_link/protocol.py`
-- Constants and errors: `src/lxb_link/constants.py`
+Code directory: `src/lxb_link/`
+
+```
+src/lxb_link/
+├── __init__.py
+├── client.py               # Main client API
+├── transport.py            # Reliable UDP transport (Stop-and-Wait ARQ)
+├── protocol.py             # Protocol frame encoding/decoding
+└── constants.py            # Command constants definition
+```
+
+### Architecture Layers
+
+```
+Application Layer (Cortex, MapBuilder)
+        ↓
+  LXBLinkClient (Unified API)
+        ↓
+  ProtocolFrame (Protocol Encoding)
+        ↓
+  Transport (Reliable UDP)
+        ↓
+  UDP Socket (Network)
+```
 
 ## 3. Core Flow
-1. Upper layer calls `LXBLinkClient` APIs (for example `tap`, `find_node`, `dump_actions`).
-2. Client encodes command payload.
-3. Transport performs reliable send and waits for response.
-4. Protocol layer unpacks binary data to Python structures.
 
-## 4. Key Interfaces & Data Shapes
-- `find_node(query, match_type, return_mode, multi_match, timeout_ms)`
-- `find_node_compound(conditions, return_mode, multi_match, timeout_ms)`
-- `dump_actions()` -> `{node_count, nodes, ...}`
-- `launch_app(package_name, clear_task, wait)`
-- `stop_app(package_name)`
+### 3.1 Command Execution Flow
 
-## 5. Failure Modes & Recovery
-- Transport failure: timeout, retry exhaustion, invalid response.
-- Protocol failure: malformed payload length or field decoding.
-- Business failure: no matching node candidates.
+```
+client.tap(500, 800)
+    │
+    v
+Encode to protocol frame (MAGIC + CMD + LEN + SEQ + PAYLOAD + CHECKSUM)
+    │
+    v
+Send + Wait ACK (timeout retransmit, max MAX_RETRIES)
+    │
+    v
+Receive response frame + verify
+    │
+    v
+Parse result and return
+```
 
-## 6. Observability
-- Client logs command send/response lifecycle.
-- Upper layers should track per-command success and timeout rates.
+### 3.2 Reliable Transport Principle
 
-## 7. Configuration
-- Device host and port.
-- Command-level timeout settings (`timeout_ms`).
+Stop-and-Wait ARQ protocol:
+1. Start timer after sending data frame
+2. Confirm send success upon receiving ACK
+3. Auto retransmit on timeout without ACK
 
-## 8. Constraints & Compatibility
-- Runtime semantics are defined by Android-side `LXB-Server` implementation.
-- `find_node` and `find_node_compound` return candidates; upper layers still need selection strategy.
+## 4. Command Categories
 
-## 9. Current Gaps
-- Stable matching for dynamic UI still depends on upper-layer heuristics.
-- Transport tuning should be validated against real weak-network environments.
+### Perception Layer (Sense)
+- `get_activity` - Get current Activity
+- `get_screen_size` - Get screen size
+- `find_node` - Single-field node search
+- `find_node_compound` - Multi-condition combined search
+- `dump_actions` - Export operable nodes
+- `dump_hierarchy` - Export complete UI tree
 
-## 10. Cross References
-- `docs/en/lxb_server.md`
-- `docs/en/lxb_map_builder.md`
-- `docs/en/lxb_cortex.md`
+### Input Layer (Input)
+- `tap` - Tap
+- `swipe` - Swipe
+- `long_press` - Long press
+- `input_text` - Input text
+- `key_event` - Key event (BACK/HOME)
+
+### Lifecycle (Lifecycle)
+- `launch_app` - Launch app
+- `stop_app` - Stop app
+- `list_apps` - List apps
+- `wake` / `unlock` - Wake/unlock
+
+## 5. Design Principles
+
+### 5.1 Reliability Design
+- Timeout retransmission mechanism (MAX_RETRIES=3)
+- Checksum verifies data integrity
+- Sequence number prevents duplicate processing
+
+### 5.2 Retrieval-First Strategy
+- `find_node_compound` priority (multi-condition combination, accurate positioning)
+- `find_node` fallback (single field, good compatibility)
+
+## 6. Code Structure
+
+| File | Responsibility | Key Content |
+|------|----------------|--------------|
+| `client.py` | Unified API entry | `LXBLinkClient` class |
+| `transport.py` | Transport layer implementation | `_send_frame`, `_recv_frame` |
+| `protocol.py` | Protocol encoding/decoding | `ProtocolFrame.encode/decode` |
+| `constants.py` | Command/constants definition | CMD_* constants |
+
+## 7. Cross References
+- `docs/en/lxb_server.md` - Android-side implementation
+- `docs/en/lxb_cortex.md` - Cortex usage examples

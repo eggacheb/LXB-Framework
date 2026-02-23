@@ -1,3 +1,34 @@
+"""
+LXB-Cortex FSM Runtime Engine
+
+This module provides the core Finite State Machine (FSM) engine for the LXB-Cortex
+automation framework. It implements the "Route-Then-Act" pattern, executing tasks
+through a deterministic state machine with optional LLM-based command planning.
+
+The FSM engine manages the complete automation lifecycle:
+1. INIT - Device initialization and coordinate space probing
+2. APP_RESOLVE - Select the target app for the task
+3. ROUTE_PLAN - Plan the route to the target page
+4. ROUTING - Navigate through UI to reach the target page
+5. VISION_ACT - Execute visual actions using VLM
+6. FINISH - Task completed successfully
+7. FAIL - Task failed with error
+
+Example:
+    >>> from lxb_link import LXBLinkClient
+    >>> from cortex import CortexFSMEngine
+    >>>
+    >>> client = LXBLinkClient('192.168.1.100', 12345)
+    >>> client.connect()
+    >>> engine = CortexFSMEngine(client)
+    >>> result = engine.run(
+    ...     user_task="Open settings and enable dark mode",
+    ...     map_path="maps/com.android.settings.json"
+    ... )
+    >>> print(result["status"])
+    success
+"""
+
 import json
 import io
 import random
@@ -14,6 +45,17 @@ from .route_then_act import FixedPlanPlanner, HeuristicPlanner, RouteConfig, Rou
 
 
 class CortexState(str, Enum):
+    """Finite state machine states for the Cortex automation engine.
+
+    The FSM progresses through these states to complete an automation task:
+    - INIT: Initialize device connection and probe coordinate space
+    - APP_RESOLVE: Select the target application for the task
+    - ROUTE_PLAN: Plan the navigation route to the target page
+    - ROUTING: Navigate through the UI hierarchy to reach target
+    - VISION_ACT: Execute visual actions using VLM guidance
+    - FINISH: Task completed successfully
+    - FAIL: Task failed with an error condition
+    """
     INIT = "INIT"
     APP_RESOLVE = "APP_RESOLVE"
     ROUTE_PLAN = "ROUTE_PLAN"
@@ -25,6 +67,23 @@ class CortexState(str, Enum):
 
 @dataclass
 class FSMConfig:
+    """Configuration parameters for the FSM engine.
+
+    Attributes:
+        max_turns: Maximum number of state transitions before timeout (default: 30)
+        max_commands_per_turn: Maximum commands to execute per model turn (default: 1)
+        max_vision_turns: Maximum number of vision/action turns (default: 20)
+        action_interval_sec: Delay between action executions in seconds (default: 0.8)
+        screenshot_settle_sec: Delay before taking screenshot on first vision turn (default: 0.6)
+        tap_bind_clickable: Whether to bind taps to nearest clickable element (default: False)
+        tap_jitter_sigma_px: Gaussian sigma for tap coordinate jitter in pixels (default: 0.0)
+        swipe_jitter_sigma_px: Gaussian sigma for swipe coordinate jitter in pixels (default: 0.0)
+        swipe_duration_jitter_ratio: Ratio for swipe duration jitter (default: 0.0)
+        xml_stable_interval_sec: Interval between XML stability checks in seconds (default: 0.3)
+        xml_stable_samples: Number of stable samples needed to consider XML stable (default: 4)
+        xml_stable_timeout_sec: Maximum time to wait for XML stability in seconds (default: 4.0)
+        init_coord_probe_enabled: Whether to probe coordinate space on init (default: True)
+    """
     max_turns: int = 30
     max_commands_per_turn: int = 1
     max_vision_turns: int = 20
@@ -42,6 +101,36 @@ class FSMConfig:
 
 @dataclass
 class CortexContext:
+    """Execution context for a Cortex automation task.
+
+    This dataclass holds all state information for a single automation task execution,
+    including task parameters, execution history, and accumulated results.
+
+    Attributes:
+        task_id: Unique identifier for this task execution
+        user_task: The natural language description of the user's task
+        map_path: Path to the navigation map JSON file
+        start_page: Optional starting page ID (None = auto-detect)
+        selected_package: Selected app package name
+        target_page: Target page ID to reach
+        route_trace: List of page IDs visited during routing
+        command_log: History of all commands executed
+        route_result: Result of the routing phase
+        error: Error message if task failed
+        output: Additional output data (coord probe, etc.)
+        vision_turns: Number of vision/action turns executed
+        app_candidates: List of candidate apps for task
+        page_candidates: List of candidate pages for routing
+        device_info: Device screen info (width, height, density)
+        current_activity: Current Android activity info
+        last_command: Last command executed
+        same_command_streak: Count of consecutive identical commands
+        last_activity_sig: Signature of last activity seen
+        same_activity_streak: Count of consecutive identical activities
+        coord_probe: Coordinate space probe results
+        llm_history: History of LLM responses with structured data
+        lessons: List of learned lessons from LLM reflections
+    """
     task_id: str
     user_task: str
     map_path: str
@@ -68,12 +157,43 @@ class CortexContext:
 
 
 class CommandPlanner(Protocol):
+    """Protocol for command planning strategies.
+
+    A CommandPlanner generates the next command to execute based on the current
+    FSM state, prompt, and execution context. This allows for different planning
+    strategies (rule-based, LLM-based, hybrid).
+    """
     def plan(self, state: CortexState, prompt: str, context: CortexContext) -> str:
+        """Generate the next command to execute.
+
+        Args:
+            state: Current FSM state
+            prompt: Formatted prompt for the planner
+            context: Current execution context
+
+        Returns:
+            Command string to execute (e.g., "TAP 500 800", "ROUTE com.app home")
+        """
         ...
 
 
 class RuleBasedPlanner:
+    """Minimal rule-based planner fallback.
+
+    This planner provides simple rule-based command generation when no LLM
+    planner is available. It uses heuristics for app selection and page targeting.
+
+    Attributes:
+        _route_loader: Function to load route maps from file paths
+        _heuristic: HeuristicPlanner instance for page matching
+    """
+
     def __init__(self, route_loader: Callable[[str], Any]):
+        """Initialize the rule-based planner.
+
+        Args:
+            route_loader: Function that loads a RouteMap from a file path
+        """
         self._route_loader = route_loader
         self._heuristic = HeuristicPlanner()
 
@@ -90,6 +210,13 @@ class RuleBasedPlanner:
 
 
 class PromptBuilder:
+    """Builds structured prompts for LLM command planning.
+
+    This class creates formatted prompts for different FSM states, specifying
+    the expected output format, allowed operations, and providing context
+    for the LLM to generate appropriate commands.
+    """
+
     _STATE_FORMATS: Dict[CortexState, Dict[str, Any]] = {
         CortexState.APP_RESOLVE: {
             "root": "app_analysis",
@@ -106,6 +233,12 @@ class PromptBuilder:
     }
 
     def _common_output_rules(self) -> str:
+        """Return common output format rules for all states.
+
+        Returns:
+            String containing the output contract rules that apply
+            to all FSM states.
+        """
         return (
             "Output Contract:\n"
             "1) Output MUST follow the state XML-like format exactly.\n"
@@ -115,6 +248,15 @@ class PromptBuilder:
         )
 
     def _dsl_semantics(self, allowed_ops: Set[str]) -> str:
+        """Generate DSL semantics documentation for allowed operations.
+
+        Args:
+            allowed_ops: Set of operation names that are allowed in current state
+
+        Returns:
+            Formatted string describing each allowed operation with its syntax
+            and usage rules.
+        """
         lines = ["DSL Semantics (only allowed ops):\n"]
         ordered = sorted([op.upper() for op in allowed_ops])
         for op in ordered:
@@ -143,17 +285,45 @@ class PromptBuilder:
         return "".join(lines)
 
     def _history_snippet(self, context: CortexContext, limit: int = 5) -> str:
+        """Extract recent LLM history as JSON.
+
+        Args:
+            context: Current execution context
+            limit: Maximum number of recent history entries to include (default: 5)
+
+        Returns:
+            JSON string of recent LLM history entries, or "[]" if empty
+        """
         if not context.llm_history:
             return "[]"
         rows = context.llm_history[-max(1, int(limit)) :]
         return json.dumps(rows, ensure_ascii=False)
 
     def _lessons_snippet(self, context: CortexContext) -> str:
+        """Extract lessons as JSON.
+
+        Args:
+            context: Current execution context
+
+        Returns:
+            JSON string of learned lessons, or "[]" if empty
+        """
         if not context.lessons:
             return "[]"
         return json.dumps(context.lessons, ensure_ascii=False)
 
     def build(self, state: CortexState, context: CortexContext, allowed_ops: Set[str]) -> str:
+        """Build a complete prompt for the given state and context.
+
+        Args:
+            state: Current FSM state
+            context: Current execution context
+            allowed_ops: Set of allowed operation names for this state
+
+        Returns:
+            Formatted prompt string containing output format rules,
+            DSL semantics, context data, and state-specific instructions.
+        """
         fmt = self._STATE_FORMATS.get(state)
         format_block = ""
         if fmt:
@@ -290,11 +460,38 @@ class PromptBuilder:
 
 
 class LLMPlanner:
+    """LLM-based command planner with optional vision support.
+
+    This planner uses an LLM to generate commands for the FSM. It supports
+    both text-only and vision-aware planning.
+
+    Attributes:
+        _complete: Function for text-only LLM completion
+        _complete_with_image: Optional function for vision-enabled LLM completion
+    """
+
     def __init__(self, complete: Callable[[str], str], complete_with_image: Optional[Callable[[str, bytes], str]] = None):
+        """Initialize the LLM planner.
+
+        Args:
+            complete: Function that takes a prompt string and returns LLM response
+            complete_with_image: Optional function that takes prompt and image bytes,
+                returns LLM response with vision understanding
+        """
         self._complete = complete
         self._complete_with_image = complete_with_image
 
     def plan(self, state: CortexState, prompt: str, context: CortexContext) -> str:
+        """Generate a command using text-only LLM completion.
+
+        Args:
+            state: Current FSM state
+            prompt: Formatted prompt for the LLM
+            context: Current execution context
+
+        Returns:
+            LLM response containing the command to execute
+        """
         return self._complete(prompt)
 
     def plan_vision(self, state: CortexState, prompt: str, context: CortexContext, screenshot: bytes) -> str:
@@ -304,11 +501,45 @@ class LLMPlanner:
 
 
 class CortexFSMEngine:
+    """Core Finite State Machine engine for LXB-Cortex automation.
+
+    This class implements the complete FSM workflow for Android automation tasks.
+    It manages state transitions, command planning, action execution, and error handling.
+
+    The FSM follows this flow:
+    1. INIT - Probe device info and coordinate space
+    2. APP_RESOLVE - Select target app using LLM or heuristics
+    3. ROUTE_PLAN - Plan navigation to target page
+    4. ROUTING - Execute route using deterministic navigation
+    5. VISION_ACT - Execute visual actions with VLM guidance
+    6. FINISH or FAIL - Task completion
+
+    Example:
+        >>> from lxb_link import LXBLinkClient
+        >>> from cortex import CortexFSMEngine, LLMPlanner
+        >>>
+        >>> client = LXBLinkClient('192.168.1.100', 12345)
+        >>> client.connect()
+        >>>
+        >>> def my_llm_complete(prompt):
+        ...     return my_llm_api.generate(prompt)
+        >>>
+        >>> planner = LLMPlanner(complete=my_llm_complete)
+        >>> engine = CortexFSMEngine(client, planner=planner)
+        >>> result = engine.run(
+        ...     user_task="Open settings and enable WiFi",
+        ...     map_path="maps/com.android.settings.json"
+        ... )
+        >>> print(result["status"])
+        'success'
+    """
+    """Allowed operations for each FSM state."""
     _ALLOWED_OPS: Dict[CortexState, Set[str]] = {
         CortexState.APP_RESOLVE: {"SET_APP", "FAIL"},
         CortexState.ROUTE_PLAN: {"ROUTE", "FAIL"},
         CortexState.VISION_ACT: {"TAP", "SWIPE", "INPUT", "WAIT", "BACK", "DONE", "FAIL"},
     }
+    """Structured output tag specifications for each FSM state."""
     _STATE_OUTPUT_TAGS: Dict[CortexState, Dict[str, Any]] = {
         CortexState.APP_RESOLVE: {
             "root": "app_analysis",
@@ -332,6 +563,17 @@ class CortexFSMEngine:
         fsm_config: Optional[FSMConfig] = None,
         log_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
+        """Initialize the Cortex FSM engine.
+
+        Args:
+            client: LXBLinkClient instance for device communication
+            planner: Optional CommandPlanner for LLM-based planning.
+                If None, uses RuleBasedPlanner as fallback.
+            route_config: Optional RouteConfig for routing phase behavior
+            fsm_config: Optional FSMConfig for engine behavior parameters
+            log_callback: Optional callback function for logging events.
+                Receives a dict with event data.
+        """
         self.client = client
         self.route_config = route_config or RouteConfig()
         self.fsm_config = fsm_config or FSMConfig()
@@ -349,6 +591,43 @@ class CortexFSMEngine:
         start_page: Optional[str] = None,
         extra_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """Execute an automation task using the FSM engine.
+
+        This is the main entry point for running automation tasks. The FSM will
+        progress through states until reaching FINISH or FAIL, or hitting max_turns.
+
+        Args:
+            user_task: Natural language description of the task to perform
+            map_path: Path to the navigation map JSON file
+            start_page: Optional starting page ID. If None, auto-detects from
+                current device state
+            extra_context: Optional additional context fields to add to CortexContext
+
+        Returns:
+            Dict containing execution results:
+                - status: "success" or "failed"
+                - task_id: Unique task identifier
+                - state: Final FSM state
+                - package_name: Selected app package
+                - target_page: Target page ID
+                - route_trace: List of pages visited during routing
+                - route_result: Detailed routing phase results
+                - command_log: History of all commands executed
+                - llm_history: LLM response history with structured data
+                - lessons: Learned lessons from reflections
+                - reason: Error reason if failed (optional)
+                - output: Additional output data (optional)
+
+        Example:
+            >>> result = engine.run(
+            ...     user_task="Enable dark mode in settings",
+            ...     map_path="maps/com.android.settings.json"
+            ... )
+            >>> if result["status"] == "success":
+            ...     print("Task completed!")
+            ... else:
+            ...     print(f"Task failed: {result.get('reason')}")
+        """
         context = CortexContext(task_id=str(uuid.uuid4()), user_task=user_task, map_path=map_path, start_page=start_page)
         for k, v in (extra_context or {}).items():
             if hasattr(context, k):
@@ -395,6 +674,21 @@ class CortexFSMEngine:
         return result
 
     def _run_model_state(self, context: CortexContext, state: CortexState) -> CortexState:
+        """Execute a model-based state (APP_RESOLVE or ROUTE_PLAN).
+
+        This method handles states that require LLM planning:
+        - Builds prompt with context and allowed operations
+        - Calls planner to generate command
+        - Parses and validates the response
+        - Updates context and determines next state
+
+        Args:
+            context: Current execution context
+            state: Current FSM state (APP_RESOLVE or ROUTE_PLAN)
+
+        Returns:
+            Next FSM state to transition to
+        """
         allowed = self._ALLOWED_OPS.get(state, set())
         prompt = self._prompt_builder.build(state, context, allowed)
         self._log(context, "llm", "prompt", state=state.value, prompt=prompt)
@@ -452,6 +746,20 @@ class CortexFSMEngine:
         return CortexState.FAIL
 
     def _run_init_state(self, context: CortexContext) -> CortexState:
+        """Execute the INIT state to initialize device and context.
+
+        This method:
+        - Retrieves device screen size and density
+        - Gets current activity info
+        - Loads app list if not provided
+        - Probes coordinate space for VLM calibration
+
+        Args:
+            context: Execution context to populate with device info
+
+        Returns:
+            CortexState.APP_RESOLVE to proceed to app selection
+        """
         self._log(context, "fsm", "state_enter", state=CortexState.INIT.value)
 
         # Screen size
@@ -502,6 +810,17 @@ class CortexFSMEngine:
         return CortexState.APP_RESOLVE
 
     def _run_routing_state(self, context: CortexContext) -> CortexState:
+        """Execute the ROUTING state to navigate to target page.
+
+        This method creates a RouteThenActCortex engine with a fixed plan
+        to navigate through the UI hierarchy to reach the target page.
+
+        Args:
+            context: Execution context with selected_package and target_page set
+
+        Returns:
+            CortexState.VISION_ACT if routing succeeds, CortexState.FAIL if routing fails
+        """
         self._log(context, "fsm", "routing_start", package_name=context.selected_package, target_page=context.target_page)
         planner = FixedPlanPlanner(context.selected_package, context.target_page)
         route_engine = RouteThenActCortex(
@@ -522,6 +841,21 @@ class CortexFSMEngine:
         return CortexState.VISION_ACT
 
     def _run_vision_state(self, context: CortexContext) -> CortexState:
+        """Execute the VISION_ACT state to perform visual actions.
+
+        This method:
+        - Takes a screenshot of the current device state
+        - Sends screenshot + context to LLM planner
+        - Parses and executes the returned action
+        - Detects and prevents action loops
+        - Transitions to FINISH on DONE command
+
+        Args:
+            context: Execution context with vision state tracking
+
+        Returns:
+            Next FSM state (VISION_ACT to continue, FINISH on success, FAIL on error)
+        """
         if context.vision_turns >= self.fsm_config.max_vision_turns:
             context.error = "vision_turn_limit"
             return CortexState.FAIL
@@ -602,6 +936,15 @@ class CortexFSMEngine:
         return CortexState.VISION_ACT
 
     def _exec_action_command(self, context: CortexContext, cmd: Instruction) -> bool:
+        """Execute a single action command (TAP, SWIPE, INPUT, WAIT, BACK).
+
+        Args:
+            context: Current execution context
+            cmd: Instruction to execute
+
+        Returns:
+            True if command executed successfully, False on error
+        """
         try:
             if cmd.op == "TAP":
                 x, y = self._map_point_by_probe(context, cmd.args[0], cmd.args[1])
@@ -685,17 +1028,39 @@ class CortexFSMEngine:
             return False
 
     def _append_commands(self, context: CortexContext, state: CortexState, commands: List[Instruction]) -> None:
+        """Append executed commands to the context log.
+
+        Args:
+            context: Execution context to append commands to
+            state: Current FSM state
+            commands: List of instructions executed
+        """
         for cmd in commands:
             context.command_log.append({"state": state.value, "op": cmd.op, "args": cmd.args, "raw": cmd.raw})
             self._log(context, "fsm", "command", state=state.value, op=cmd.op, args=cmd.args)
 
     def _screenshot(self) -> Optional[bytes]:
+        """Capture a screenshot from the device.
+
+        Returns:
+            Screenshot image bytes, or None if capture failed
+        """
         try:
             return self.client.request_screenshot()
         except Exception:
             return None
 
     def _in_screen_bounds(self, context: CortexContext, x: int, y: int) -> bool:
+        """Check if coordinates are within screen bounds.
+
+        Args:
+            context: Execution context with device_info containing screen dimensions
+            x: X coordinate to check
+            y: Y coordinate to check
+
+        Returns:
+            True if coordinates are within valid screen area, False if invalid bounds
+        """
         w = int(context.device_info.get("width") or 0)
         h = int(context.device_info.get("height") or 0)
         if w <= 0 or h <= 0:
@@ -703,6 +1068,17 @@ class CortexFSMEngine:
         return 0 <= x < w and 0 <= y < h
 
     def _apply_point_jitter(self, context: CortexContext, x: int, y: int, sigma: float) -> tuple[int, int]:
+        """Apply Gaussian jitter to coordinates for more natural touch input.
+
+        Args:
+            context: Execution context with device screen dimensions
+            x: Original X coordinate
+            y: Original Y coordinate
+            sigma: Standard deviation for Gaussian distribution in pixels
+
+        Returns:
+            Tuple of (jittered_x, jittery_y) clamped to screen bounds
+        """
         if sigma <= 0:
             return x, y
         jx = int(round(random.gauss(x, sigma)))
@@ -716,6 +1092,15 @@ class CortexFSMEngine:
         return jx, jy
 
     def _apply_duration_jitter(self, duration_ms: int, ratio: float) -> int:
+        """Apply Gaussian jitter to duration values.
+
+        Args:
+            duration_ms: Original duration in milliseconds
+            ratio: Jitter ratio (sigma = duration_ms * ratio)
+
+        Returns:
+            Jittered duration in milliseconds, minimum 80ms
+        """
         if duration_ms <= 0 or ratio <= 0:
             return max(1, duration_ms)
         sigma = max(1.0, duration_ms * ratio)
@@ -723,6 +1108,15 @@ class CortexFSMEngine:
         return max(80, jittered)
 
     def _wait_for_xml_stable(self, context: CortexContext, reason: str) -> None:
+        """Wait for the UI hierarchy to stabilize after an action.
+
+        This method polls dump_actions() and waits for the signature to remain
+        stable across multiple samples, indicating the UI has settled.
+
+        Args:
+            context: Execution context for logging
+            reason: Description of what action triggered the wait (for logging)
+        """
         interval = max(0.05, float(self.fsm_config.xml_stable_interval_sec))
         stable_needed = max(2, int(self.fsm_config.xml_stable_samples))
         timeout = max(interval, float(self.fsm_config.xml_stable_timeout_sec))
@@ -775,6 +1169,15 @@ class CortexFSMEngine:
         )
 
     def _dump_actions_signature(self) -> str:
+        """Generate a compact signature of the current UI hierarchy.
+
+        This method creates a hash-like string from dump_actions() output
+        to detect when the UI has stabilized.
+
+        Returns:
+            String signature containing bounds, clickable state, text,
+            resource_id, and class for each node, limited to 400 nodes
+        """
         try:
             raw = self.client.dump_actions() or {}
             nodes = raw.get("nodes") or []
@@ -797,6 +1200,14 @@ class CortexFSMEngine:
         return "|".join(tokens)
 
     def _refresh_activity(self, context: CortexContext) -> None:
+        """Refresh the current activity info and track activity streaks.
+
+        Updates context.current_activity and tracks consecutive identical
+        activities for loop detection.
+
+        Args:
+            context: Execution context to update with activity info
+        """
         try:
             ok, pkg, activity = self.client.get_activity()
             context.current_activity = {
@@ -815,6 +1226,20 @@ class CortexFSMEngine:
             self._log(context, "fsm", "activity_refresh_failed", error=str(e))
 
     def _resolve_tap_clickable(self, context: CortexContext, x: int, y: int) -> tuple[int, int, Optional[List[int]]]:
+        """Map a TAP point to the center of the smallest clickable bounds containing it.
+
+        This helps improve tap accuracy by snapping to clickable element centers
+        when tap_bind_clickable is enabled.
+
+        Args:
+            context: Execution context with device info
+            x: Original tap X coordinate
+            y: Original tap Y coordinate
+
+        Returns:
+            Tuple of (tap_x, tap_y, bounds) where bounds is the clicked element's
+            bounds [left, top, right, bottom] or None if no clickable element found
+        """
         """
         Map a TAP point to the center of the smallest clickable bounds that contains it.
         If no clickable container contains the point, keep original coordinates.
@@ -877,6 +1302,19 @@ class CortexFSMEngine:
         return tx, ty, pick
 
     def _normalize_model_output(self, raw: str, state: CortexState, context: CortexContext) -> str:
+        """Normalize model output to a standard command format.
+
+        Handles both JSON responses and direct command strings, converting
+        JSON to appropriate DSL commands.
+
+        Args:
+            raw: Raw model output string
+            state: Current FSM state
+            context: Execution context
+
+        Returns:
+            Normalized command string (e.g., "SET_APP com.example", "ROUTE pkg home")
+        """
         text = (raw or "").strip()
         if not text or not text.startswith("{"):
             return text
@@ -904,6 +1342,19 @@ class CortexFSMEngine:
         return text
 
     def _extract_structured_command(self, state: CortexState, raw: str) -> tuple[str, Dict[str, Any]]:
+        """Extract structured XML-like output from model response.
+
+        Parses the model's XML-formatted response to extract both the command
+        and structured analysis fields (user_intent, decision, reflection, etc.).
+
+        Args:
+            state: Current FSM state (determines expected format)
+            raw: Raw model output string
+
+        Returns:
+            Tuple of (command_text, structured_dict) where structured_dict
+            contains the parsed XML fields, or empty dict if parsing fails
+        """
         text = (raw or "").strip()
         if not text:
             return "", {}
@@ -931,12 +1382,30 @@ class CortexFSMEngine:
         return cmd.strip(), {"root": root, **fields}
 
     def _extract_tag_text(self, text: str, tag: str) -> str:
+        """Extract content between XML-like tags.
+
+        Args:
+            text: Text to search within
+            tag: Tag name to extract (e.g., "command", "decision")
+
+        Returns:
+            Content between <tag> and </tag>, or empty string if not found
+        """
         m = re.search(rf"<{tag}>\s*([\s\S]*?)\s*</{tag}>", text, flags=re.IGNORECASE)
         if not m:
             return ""
         return m.group(1).strip()
 
     def _collect_lesson(self, context: CortexContext, structured: Dict[str, Any]) -> None:
+        """Extract and store a lesson from structured LLM output.
+
+        Lessons are reusable insights learned during execution that are
+        fed back to the LLM in subsequent turns.
+
+        Args:
+            context: Execution context to append lesson to
+            structured: Structured output dict potentially containing "lesson" field
+        """
         raw = str((structured or {}).get("lesson") or "").strip()
         if not raw:
             return
@@ -949,6 +1418,19 @@ class CortexFSMEngine:
         context.lessons.append(lesson)
 
     def _probe_coordinate_space(self, context: CortexContext) -> Dict[str, Any]:
+        """Probe the VLM's coordinate space by sending a synthetic calibration image.
+
+        This method creates a synthetic image with colored corner markers and
+        asks the VLM to identify the corners, establishing the VLM's native
+        coordinate range for accurate point mapping.
+
+        Args:
+            context: Execution context for logging and result storage
+
+        Returns:
+            Dict containing calibration data (max_x, max_y, x_min, x_max, y_min, y_max,
+            span_x, span_y, points, probe_size) or empty dict if probing fails
+        """
         if not bool(self.fsm_config.init_coord_probe_enabled):
             return {}
         if not hasattr(self.planner, "plan_vision"):
@@ -1009,6 +1491,21 @@ class CortexFSMEngine:
             return {}
 
     def _build_coord_probe_image(self, width: int, height: int) -> bytes:
+        """Build a synthetic calibration image for coordinate space probing.
+
+        Creates a black image with colored L-shaped corner markers:
+        - Top-left: RED
+        - Top-right: GREEN
+        - Bottom-left: BLUE
+        - Bottom-right: YELLOW
+
+        Args:
+            width: Image width in pixels
+            height: Image height in pixels
+
+        Returns:
+            PNG image bytes
+        """
         from PIL import Image, ImageDraw
 
         img = Image.new("RGB", (int(width), int(height)), (0, 0, 0))
@@ -1035,6 +1532,15 @@ class CortexFSMEngine:
         return out.getvalue()
 
     def _parse_coord_probe_response(self, raw: str) -> Dict[str, tuple[float, float]]:
+        """Parse the VLM's corner detection response from coordinate probing.
+
+        Args:
+            raw: Raw VLM response string, should contain JSON with corner coordinates
+
+        Returns:
+            Dict mapping corner keys ("tl", "tr", "bl", "br") to (x, y) tuples,
+            or empty dict if parsing fails
+        """
         text = (raw or "").strip()
         obj = None
         try:
@@ -1067,11 +1573,23 @@ class CortexFSMEngine:
         return out
 
     def _map_point_by_probe(self, context: CortexContext, raw_x: str, raw_y: str) -> tuple[int, int]:
-        """
-        Map LLM point by INIT probe max range:
-        x_real = x_llm / max_x * (screen_w - 1)
-        y_real = y_llm / max_y * (screen_h - 1)
-        If probe data is missing/invalid, fallback to direct int parsing.
+        """Map VLM coordinates to screen coordinates using calibration data.
+
+        Uses the coordinate space probe results to accurately map VLM-generated
+        coordinates to actual device screen coordinates. Supports both range-based
+        affine mapping and max-only scaling fallback.
+
+        Mapping formulas:
+        - Range affine: x_screen = (x_llm - x_min) / (x_max - x_min) * (screen_w - 1)
+        - Max-only fallback: x_screen = x_llm / max_x * (screen_w - 1)
+
+        Args:
+            context: Execution context with device_info and coord_probe data
+            raw_x: VLM X coordinate as string
+            raw_y: VLM Y coordinate as string
+
+        Returns:
+            Tuple of (screen_x, screen_y) clamped to screen bounds
         """
         xf = float(raw_x)
         yf = float(raw_y)
@@ -1142,6 +1660,14 @@ class CortexFSMEngine:
         return rx, ry
 
     def _log(self, context: CortexContext, stage: str, event: str, **kwargs: Any) -> None:
+        """Log an event with timestamp and task context.
+
+        Args:
+            context: Execution context for task_id
+            stage: Stage identifier (e.g., "fsm", "exec", "llm", "route")
+            event: Event name within the stage
+            **kwargs: Additional event-specific data to log
+        """
         payload = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "task_id": context.task_id,
@@ -1156,6 +1682,18 @@ class CortexFSMEngine:
 
 
 def _normalize_app_candidates(raw_apps: Any) -> List[Dict[str, Any]]:
+    """Normalize app candidate data to a standard format.
+
+    Converts various input formats (dict with package/name, strings, etc.)
+    to a consistent list of dicts with "package" and "name" keys.
+
+    Args:
+        raw_apps: Raw app data from client.list_apps(), can be list of dicts
+            or list of strings
+
+    Returns:
+        List of dicts with "package" and "name" keys
+    """
     out: List[Dict[str, Any]] = []
     for item in raw_apps or []:
         if isinstance(item, dict):

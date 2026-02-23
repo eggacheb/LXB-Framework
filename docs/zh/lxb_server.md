@@ -1,49 +1,105 @@
-﻿# LXB-Server
+# LXB-Server
 
 ## 1. Scope
-`LXB-Server` 是 Android 端服务核心，负责接收协议命令并执行输入注入、节点检索、状态获取等能力。
+LXB-Server 是 Android 端服务核心，接收协议命令并执行输入注入、节点检索、状态获取。
 
 ## 2. Architecture
-- 代码路径：`android/LXB-Ignition/lxb-core`
-- 核心模块：
-  - 协议与分发：`protocol/`, `dispatcher/`
-  - 感知引擎：`perception/PerceptionEngine.java`
-  - 执行引擎：输入/生命周期相关执行组件
+代码目录：`android/LXB-Ignition/lxb-core/`
+
+```
+lxb-core/
+├── protocol/               # 协议解析与分发
+├── dispatcher/            # 命令分发器
+├── perception/            # 感知引擎
+└── executors/             # 执行器实现
+```
+
+### 服务架构
+
+```
+Shizuku IPC
+       │
+       v
+LXB-Server Core
+       │
+       ├──> Perception Engine (Accessibility Service)
+       │      └── 获取 UI 树、节点属性
+       │
+       └──> Executors (Input/Lifecycle)
+              └── 注入输入、应用控制
+```
 
 ## 3. Core Flow
-1. 接收二进制命令帧。
-2. 解析命令 ID 与 payload。
-3. 分发到对应引擎（感知或执行）。
-4. 生成响应并返回客户端。
 
-## 4. Key Interfaces & Data Shapes
-- `FIND_NODE`：单字段匹配。
-- `FIND_NODE_COMPOUND`：多条件匹配。
-- `DUMP_ACTIONS`：可交互节点导出。
-- 应用控制：`LAUNCH_APP`, `STOP_APP`。
+### 3.1 命令处理流程
 
-## 5. Failure Modes & Recovery
-- 反射/API 访问失败。
-- 节点树不可用或瞬态为空。
-- 应用生命周期命令执行失败。
+```
+接收 UDP 帧
+    │
+    v
+解析帧 (CMD ID + Payload)
+    │
+    v
+分发到对应引擎
+    │
+    ├──> Perception Commands → AccessibilityService → UI 树数据
+    │
+    └──> Execution Commands → Input Manager → 设备操作
+    │
+    v
+生成响应帧
+```
 
-## 6. Observability
-- 服务端标准输出日志包含命令接收、匹配数量、异常原因。
-- 建议结合 WebConsole 日志做端到端排障。
+### 3.2 感知引擎原理
 
-## 7. Configuration
-- 启动参数与设备运行环境。
-- 与宿主 App（Ignition）的连接上下文。
+**AccessibilityService 机制**：
+- 继承 Android AccessibilityService
+- 监听 UI 变化事件
+- 遍历 UI 树提取节点信息
 
-## 8. Constraints & Compatibility
-- 节点匹配行为由 Android runtime 与 UI 树状态决定。
-- 与 `LXB-Link` 协议字段定义需要保持一致。
+**节点属性提取**：
+- `getText()` - 可见文本
+- `getResourceName()` - Resource ID
+- `getBoundsInScreen()` - 屏幕坐标
+- `isClickable()` - 可点击性
 
-## 9. Current Gaps
-- 不同 ROM/系统版本下 UI 树可见性差异会影响匹配稳定性。
-- 部分命令在特定应用（高安全策略）下存在限制。
+### 3.3 输入注入方式
 
-## 10. Cross References
-- `docs/zh/lxb_link.md`
-- `docs/zh/lxb_web_console.md`
-- `android/LXB-Ignition/README.md`
+| 方式 | 实现原理 | 优先级 |
+|------|----------|--------|
+| Accessibility API | `performAction(ACTION_CLICK)` | 最高 |
+| Clipboard | 设置剪贴板 + 粘贴 | 中 |
+| Shell input | `input text` 命令 | 最低 (降级) |
+
+## 4. Node Matching
+
+### 4.1 单字段查找 (FIND_NODE)
+1. 获取当前 UI 树
+2. 根据 match_type 选择匹配字段
+3. 遍历节点，执行匹配逻辑
+4. 收集所有匹配节点
+
+### 4.2 多条件查找 (FIND_NODE_COMPOUND)
+1. 构建条件三元组：(field, operator, value)
+2. 对所有节点逐条件验证
+3. 返回满足所有条件的节点
+
+## 5. Failure Modes
+
+| 失败类型 | 原因 | 处理 |
+|----------|------|------|
+| Service 断开 | 系统回收服务 | 返回错误码 |
+| UI 树为空 | 页面加载中 | 返回空列表 |
+| 权限不足 | Shizuku 未授权 | 返回权限错误 |
+
+## 6. Code Structure
+
+| Java 文件 | 职责 |
+|----------|------|
+| `PerceptionEngine.java` | 感知引擎入口 |
+| `CommandDispatcher.java` | 命令路由分发 |
+| `NodeFinder.java` | 节点查找逻辑 |
+
+## 7. Cross References
+- `docs/zh/lxb_link.md` - 协议定义
+- `docs/zh/lxb_web_console.md` - Web 控制台
