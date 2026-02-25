@@ -332,42 +332,28 @@ class MapPromptPlanner:
         Returns:
             Formatted prompt string for LLM completion
         """
-        edge_rows = []
-        for edge in route_map.transitions:
-            edge_rows.append(
-                {
-                    "from": edge.from_page,
-                    "to": edge.to_page,
-                    "trigger": edge.description or "",
-                }
-            )
-
         page_rows = []
         for page_id, page in route_map.pages.items():
-            aliases = page.get("target_aliases") or []
             features = page.get("features") or []
             row = {
                 "page_id": page_id,
-                "legacy_page_id": page.get("legacy_page_id", ""),
                 "name": page.get("name", ""),
                 "description": page.get("description", ""),
                 "features": features[:12],
-                "aliases": aliases[:6],
             }
             page_rows.append(row)
 
         brief_map = {
             "package": route_map.package,
             "pages": page_rows,
-            "transitions": edge_rows,
         }
         return (
             "You are a mobile route planner.\n"
             "Given user task and route map, output JSON only:\n"
             '{"package_name":"...","target_page":"..."}\n'
             "Rules:\n"
-            "1) target_page must be one page_id from map.pages, or one legacy_page_id.\n"
-            "2) You MUST use semantic fields (name/description/features/aliases) to match intent.\n"
+            "1) target_page must be one page_id from map.pages.\n"
+            "2) You MUST use semantic fields (name/description/features) to match intent.\n"
             "3) If intent is ambiguous, choose the page whose semantic description is most specific.\n\n"
             f"user_task:\n{user_task}\n\n"
             f"route_map:\n{json.dumps(brief_map, ensure_ascii=False)}"

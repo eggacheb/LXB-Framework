@@ -226,3 +226,10 @@ screenshots_cache/
 # Paper Materials
 # =============================================================================
 paper/
+
+# =============================================================================
+# Benchmark Local Files
+# =============================================================================
+benchmark/config.py
+benchmark/results.jsonl
+benchmark/logs/vlm_react_steps.jsonl
