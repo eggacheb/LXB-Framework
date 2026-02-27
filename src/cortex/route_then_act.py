@@ -963,10 +963,9 @@ class RouteThenActCortex:
         """Resolve a locator to screen bounds using multiple strategies.
 
         Resolution strategy (in order):
-        1. XML-first matching against dump_actions() output
-        2. Compound find_node with strict conditions
-        3. Compound find_node with relaxed conditions (no text)
-        4. Single-field find_node queries
+        1. L1: strict self-identity match (rid/text/desc/class)
+        2. L2: if ambiguous, add parent_rid as narrowing condition
+        3. L3: if still ambiguous, apply locator_index/locator_count
 
         Args:
             locator: Locator to resolve
@@ -974,40 +973,112 @@ class RouteThenActCortex:
         Returns:
             Screen bounds as (left, top, right, bottom) tuple, or None if not found
         """
-        # strict compound
-        strict = _compound_conditions(locator, include_text=True)
-        relaxed = _compound_conditions(locator, include_text=False)
+        xml_nodes = self._dump_actions()
+        if not xml_nodes:
+            return None
 
-        for conds in (strict, relaxed):
-            if len(conds) < 2:
-                continue
-            try:
-                status, candidates = self.client.find_node_compound(conds, return_mode=1, multi_match=True)
-                if status == 1:
-                    picked = _pick_best_bounds(locator, candidates)
-                    if picked:
-                        return picked
-            except Exception:
-                pass
+        self_hits = self._locator_self_candidates(locator, xml_nodes)
+        if len(self_hits) == 1:
+            return _node_bounds(self_hits[0])
 
-        # fallback single query
-        for match_type, query in _single_queries(locator):
-            try:
-                status, candidates = self.client.find_node(
-                    query,
-                    match_type=match_type,
-                    return_mode=1,
-                    multi_match=True,
-                    timeout_ms=3000,
-                )
-                if status == 1:
-                    picked = _pick_best_bounds(locator, candidates)
-                    if picked:
-                        return picked
-            except Exception:
-                continue
+        narrowed = self_hits
+        if len(self_hits) > 1 and (locator.parent_rid or "").strip():
+            narrowed = self._filter_by_parent_rid(self_hits, xml_nodes, locator.parent_rid or "")
+            if len(narrowed) == 1:
+                return _node_bounds(narrowed[0])
 
+        if (
+            len(narrowed) > 1
+            and locator.locator_index is not None
+            and locator.locator_count is not None
+            and int(locator.locator_count) <= 3
+            and len(narrowed) <= 3
+        ):
+            ordered = sorted(
+                [n for n in narrowed if _node_bounds(n) is not None],
+                key=lambda n: (
+                    _node_bounds(n)[1],
+                    _node_bounds(n)[0],
+                    _node_bounds(n)[3],
+                    _node_bounds(n)[2],
+                ),
+            )
+            idx = int(locator.locator_index)
+            if 0 <= idx < len(ordered):
+                return _node_bounds(ordered[idx])
         return None
+
+    def _locator_self_candidates(self, locator: Locator, xml_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rid = _norm_key(locator.resource_id)
+        txt = _norm_key(locator.text)
+        desc = _norm_key(locator.content_desc)
+        cls = _norm_key(locator.class_name, is_class=True)
+        has_identity = bool(rid or txt or desc or cls)
+        if not has_identity:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for node in xml_nodes:
+            if not node.get("clickable", False):
+                continue
+            if _node_bounds(node) is None:
+                continue
+            if rid and _norm_key(node.get("resource_id")) != rid:
+                continue
+            if txt and _norm_key(node.get("text")) != txt:
+                continue
+            if desc and _norm_key(node.get("content_desc")) != desc:
+                continue
+            if cls and _norm_key(node.get("class"), is_class=True) != cls:
+                continue
+            out.append(node)
+        return out
+
+    def _filter_by_parent_rid(
+        self,
+        candidates: List[Dict[str, Any]],
+        xml_nodes: List[Dict[str, Any]],
+        parent_rid: str,
+    ) -> List[Dict[str, Any]]:
+        target = _norm_key(parent_rid)
+        if not target:
+            return candidates
+
+        out: List[Dict[str, Any]] = []
+        for node in candidates:
+            inferred_parent = self._infer_parent_resource_id(node, xml_nodes)
+            if _norm_key(inferred_parent) == target:
+                out.append(node)
+        return out
+
+    def _infer_parent_resource_id(
+        self,
+        child_node: Dict[str, Any],
+        xml_nodes: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        child_bounds = _node_bounds(child_node)
+        if not child_bounds:
+            return None
+        cl, ct, cr, cb = child_bounds
+
+        best_rid: Optional[str] = None
+        best_area = float("inf")
+        for node in xml_nodes:
+            if node is child_node:
+                continue
+            nb = _node_bounds(node)
+            if not nb:
+                continue
+            nl, nt, nr, nbottom = nb
+            if nl <= cl and nt <= ct and nr >= cr and nbottom >= cb and (nl < cl or nt < ct or nr > cr or nbottom > cb):
+                rid = node.get("resource_id") or ""
+                if not rid:
+                    continue
+                area = (nr - nl) * (nbottom - nt)
+                if area < best_area:
+                    best_area = area
+                    best_rid = rid
+        return best_rid
 
     # ----------------------------
     # Low-level data
@@ -1122,8 +1193,6 @@ def _compound_conditions(locator: Locator, include_text: bool) -> List[Tuple[int
         conds.append((2, 0, locator.content_desc))
     if locator.class_name:
         conds.append((3, 3, locator.class_name.split(".")[-1]))  # ENDS_WITH
-    if locator.parent_rid:
-        conds.append((4, 0, locator.parent_rid))
     return conds
 
 
@@ -1252,6 +1321,15 @@ def _node_bounds(node: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
     if b[2] <= b[0] or b[3] <= b[1]:
         return None
     return b
+
+
+def _norm_key(value: Any, is_class: bool = False) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if is_class:
+        return text.split(".")[-1]
+    return text.split("/")[-1]
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:

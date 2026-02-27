@@ -246,3 +246,4 @@ benchmark_comm/config.py
 benchmark_comm/results/
 
 TODO.md
+scripts/

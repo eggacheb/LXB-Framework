@@ -452,7 +452,7 @@ class PromptBuilder:
                     "If finished now and DONE gate passed, output DONE only.\n",
                     "Examples:\n",
                     "<vision_analysis><page_state>当前在签到列表页，存在多个可操作入口</page_state><step_review>Step-1: command=TAP 890 67, page_change=进入签到页, result=有效; Step-2: command=TAP 720 420, page_change=无明显变化, result=疑似无效; Step-3: command=TAP 720 420, page_change=无明显变化, result=重复无效</step_review><reflection>最近步骤显示同一动作连续无效，当前策略在原地重复。应避免继续重复该动作意图，改为滚动扫描更多可签到项。</reflection><next_step_reasoning>先下滑一屏扩展可见范围，再选择新的可执行入口</next_step_reasoning><completion_gate><completion_claim>当前仅确认可见区域状态</completion_claim><coverage_check>failed: 仍可能有未显示内容</coverage_check><verification_actions>尚未完成覆盖验证</verification_actions></completion_gate></vision_analysis>\n",
-                    "<command>SWIPE 640 1600 640 1400 650</command>\n",
+                    "<command>SWIPE 640 800 640 700 650</command>\n",
                 ]
             )
 
