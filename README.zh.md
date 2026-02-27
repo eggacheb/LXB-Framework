@@ -48,9 +48,7 @@ LXB-Framework 是一个面向 Android 自动化的工程体系，核心目标是
 
 ## 架构
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     用户界面层                               │
+```text
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │ Web 控制台   │  │ Python API   │  │  示例代码    │      │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
@@ -76,7 +74,7 @@ LXB-Framework 是一个面向 Android 自动化的工程体系，核心目标是
 ## 模块介绍
 
 | 模块 | 描述 | 代码路径 |
-|------|------|----------|
+| --- | --- | --- |
 | **LXB-Link** | 设备通信客户端，可靠 UDP 协议 | `src/lxb_link/` |
 | **LXB-Server** | Android 端服务，输入注入和 UI 感知 | `android/LXB-Ignition/` |
 | **LXB-MapBuilder** | 使用 VLM+XML 自动构建应用导航地图 | `src/auto_map_builder/` |
@@ -171,7 +169,7 @@ python app.py
 
 ## 项目结构
 
-```
+```text
 LXB-Framework/
 ├── android/LXB-Ignition/    # Android 服务 (Shizuku)
 ├── docs/
