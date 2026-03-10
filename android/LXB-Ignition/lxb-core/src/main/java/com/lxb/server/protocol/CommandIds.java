@@ -42,4 +42,12 @@ public final class CommandIds {
     // Media layer
     public static final byte CMD_SCREENSHOT = 0x60;
     public static final byte CMD_IMG_REQ = 0x61;
+
+    // Cortex/Map debug layer (0x70-0x7F) - end-side cortex migration bootstrap
+    // NOTE: keep aligned with Python constants when PC-side support is added.
+    public static final byte CMD_MAP_SET_GZ = 0x70;          // burn map (gzip json)
+    public static final byte CMD_MAP_GET_INFO = 0x71;        // get current map info
+    public static final byte CMD_CORTEX_RESOLVE_LOCATOR = 0x72; // resolve locator -> bounds
+    public static final byte CMD_CORTEX_TAP_LOCATOR = 0x73;     // resolve + tap
+    public static final byte CMD_CORTEX_TRACE_PULL = 0x74;      // pull trace lines (jsonl)
 }

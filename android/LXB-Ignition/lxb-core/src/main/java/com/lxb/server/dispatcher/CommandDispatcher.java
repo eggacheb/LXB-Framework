@@ -2,6 +2,7 @@ package com.lxb.server.dispatcher;
 
 import com.lxb.server.daemon.CircuitBreaker;
 import com.lxb.server.daemon.SequenceTracker;
+import com.lxb.server.cortex.CortexFacade;
 import com.lxb.server.execution.ExecutionEngine;
 import com.lxb.server.perception.PerceptionEngine;
 import com.lxb.server.protocol.CommandIds;
@@ -25,6 +26,7 @@ public class CommandDispatcher {
     private final ExecutionEngine executionEngine;
     private final SequenceTracker sequenceTracker;
     private final CircuitBreaker circuitBreaker;
+    private final CortexFacade cortexFacade;
 
     // ACK cache keyed by frame fingerprint (for UDP retry dedup only).
     private final Map<SequenceTracker.FrameKey, byte[]> ackCache =
@@ -45,6 +47,7 @@ public class CommandDispatcher {
         this.executionEngine = executionEngine;
         this.sequenceTracker = sequenceTracker;
         this.circuitBreaker = circuitBreaker;
+        this.cortexFacade = new CortexFacade(perceptionEngine, executionEngine);
     }
 
     /**
@@ -147,6 +150,23 @@ public class CommandDispatcher {
                 // Media Layer
                 case CommandIds.CMD_SCREENSHOT:
                     response = perceptionEngine.handleScreenshot();
+                    break;
+
+                // Cortex/Map debug layer (bootstrap)
+                case CommandIds.CMD_MAP_SET_GZ:
+                    response = cortexFacade.handleMapSetGz(payload);
+                    break;
+                case CommandIds.CMD_MAP_GET_INFO:
+                    response = cortexFacade.handleMapGetInfo(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_RESOLVE_LOCATOR:
+                    response = cortexFacade.handleResolveLocator(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_TAP_LOCATOR:
+                    response = cortexFacade.handleTapLocator(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_TRACE_PULL:
+                    response = cortexFacade.handleTracePull(payload);
                     break;
 
                 default:

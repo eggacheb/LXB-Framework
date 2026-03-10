@@ -149,6 +149,15 @@ CMD_HIERARCHY_CHUNK = 0x6B # UI tree chunk (chunk_index + data)
 CMD_HIERARCHY_FIN = 0x6C   # UI tree transfer complete (reuses CMD_IMG_MISSING for missing chunks)
 # 0x6D-0x6F: Reserved for streaming
 
+# -----------------------------------------------------------------------------
+# Cortex/Map Debug Layer (0x70-0x7F) - End-side cortex bootstrap
+# -----------------------------------------------------------------------------
+CMD_MAP_SET_GZ = 0x70          # Burn map (gzip json) to device local storage
+CMD_MAP_GET_INFO = 0x71        # Query current map info
+CMD_CORTEX_RESOLVE_LOCATOR = 0x72  # Resolve locator -> bounds (no action)
+CMD_CORTEX_TAP_LOCATOR = 0x73      # Resolve locator then tap
+CMD_CORTEX_TRACE_PULL = 0x74       # Pull last N trace lines (JSONL)
+
 # =============================================================================
 
 # Implemented command IDs (client + android server end-to-end as of v1).
@@ -184,6 +193,11 @@ IMPLEMENTED_COMMANDS_V1 = {
     CMD_IMG_CHUNK,
     CMD_IMG_MISSING,
     CMD_IMG_FIN,
+    CMD_MAP_SET_GZ,
+    CMD_MAP_GET_INFO,
+    CMD_CORTEX_RESOLVE_LOCATOR,
+    CMD_CORTEX_TAP_LOCATOR,
+    CMD_CORTEX_TRACE_PULL,
 }
 
 # =============================================================================

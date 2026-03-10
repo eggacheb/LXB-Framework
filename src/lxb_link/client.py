@@ -53,6 +53,12 @@ from .constants import (
     CMD_LAUNCH_APP,
     CMD_STOP_APP,
     CMD_LIST_APPS,
+    # Cortex/Map debug (bootstrap)
+    CMD_MAP_SET_GZ,
+    CMD_MAP_GET_INFO,
+    CMD_CORTEX_RESOLVE_LOCATOR,
+    CMD_CORTEX_TAP_LOCATOR,
+    CMD_CORTEX_TRACE_PULL,
     # Match types for FIND_NODE
     MATCH_EXACT_TEXT,
     MATCH_CONTAINS_TEXT,
@@ -1122,6 +1128,97 @@ class LXBLinkClient:
 
         logger.info(f"DUMP_ACTIONS successful: {result['node_count']} nodes")
         return result
+
+    # =========================================================================
+    # Cortex/Map Debug (End-side Cortex Bootstrap)
+    # =========================================================================
+
+    def map_set_gz(self, package: str, map_json: str) -> dict:
+        """
+        Burn (upload) a map JSON to device local storage via gzip payload.
+
+        Notes:
+        - This is a bootstrap/debug feature. It is not a full map streaming protocol.
+        - gzip typically makes maps small enough to fit a single UDP payload.
+
+        Payload:
+            package_len[2B] + package[UTF-8] + gzipped_map_json[...]
+
+        Returns:
+            JSON dict: {ok: bool, ...}
+        """
+        self._ensure_connected()
+
+        import gzip
+        import json
+        import struct
+
+        pkg = package.strip().encode("utf-8")
+        gz = gzip.compress(map_json.encode("utf-8"))
+        payload = struct.pack(">H", len(pkg)) + pkg + gz
+
+        resp = self._cmd(CMD_MAP_SET_GZ, payload, timeout_factor=5.0)
+        return json.loads(resp.decode("utf-8", errors="replace"))
+
+    def map_get_info(self, package: str) -> dict:
+        """
+        Query current burned map info on the device for a given package.
+
+        Payload: package[UTF-8]
+        Returns: JSON dict
+        """
+        self._ensure_connected()
+        import json
+
+        resp = self._cmd(CMD_MAP_GET_INFO, package.strip().encode("utf-8"))
+        return json.loads(resp.decode("utf-8", errors="replace"))
+
+    def cortex_resolve_locator(self, locator: dict) -> dict:
+        """
+        Resolve a locator dict to a unique bounds on current screen (no action).
+
+        Payload: locator json (UTF-8)
+        Returns: JSON dict: {ok: bool, bounds: [l,t,r,b], ...}
+        """
+        self._ensure_connected()
+        import json
+
+        payload = json.dumps(locator, ensure_ascii=False).encode("utf-8")
+        resp = self._cmd(CMD_CORTEX_RESOLVE_LOCATOR, payload, timeout_factor=5.0)
+        return json.loads(resp.decode("utf-8", errors="replace"))
+
+    def cortex_tap_locator(self, locator: dict) -> dict:
+        """
+        Resolve locator then tap its center.
+
+        Payload: locator json (UTF-8)
+        Returns: JSON dict
+        """
+        self._ensure_connected()
+        import json
+
+        payload = json.dumps(locator, ensure_ascii=False).encode("utf-8")
+        resp = self._cmd(CMD_CORTEX_TAP_LOCATOR, payload, timeout_factor=5.0)
+        return json.loads(resp.decode("utf-8", errors="replace"))
+
+    def cortex_trace_pull(self, max_lines: int = 200) -> str:
+        """
+        Pull last N trace lines (JSONL).
+
+        Payload: max_lines[2B]
+        Returns: string (JSONL, each line is a json object)
+        """
+        self._ensure_connected()
+        import struct
+
+        n = int(max_lines)
+        if n < 1:
+            n = 1
+        if n > 1000:
+            n = 1000
+        payload = struct.pack(">H", n)
+        resp = self._cmd(CMD_CORTEX_TRACE_PULL, payload, timeout_factor=3.0)
+        return resp.decode("utf-8", errors="replace")
 
     def _parse_dump_actions_response(self, data: bytes) -> dict:
         """
