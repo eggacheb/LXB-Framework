@@ -1,4 +1,4 @@
-/**
+﻿/**
  * LXB Web Console - Frontend Logic
  */
 
@@ -189,6 +189,133 @@ function handleCommand(cmd) {
         case 'screenshot':
             takeScreenshot();
             break;
+
+        // =============================================================
+        // Cortex / Map Debug Layer
+        // =============================================================
+        case 'map_get_info': {
+            const pkgInput = document.getElementById('cortex-package');
+            const fallbackPkg = document.getElementById('app-package');
+            const pkg = (pkgInput && pkgInput.value.trim()) || (fallbackPkg && fallbackPkg.value.trim());
+            if (!pkg) {
+                addLog('error', '请先填写包名 (cortex-package 或 app-package)');
+                return;
+            }
+            sendCommand('/api/command/map_get_info', { package: pkg }, `MAP_GET_INFO ${pkg}`);
+            break;
+        }
+
+        case 'map_set_gz': {
+            const pkgInput = document.getElementById('cortex-package');
+            const fallbackPkg = document.getElementById('app-package');
+            const pkg = (pkgInput && pkgInput.value.trim()) || (fallbackPkg && fallbackPkg.value.trim());
+            const mapTextEl = document.getElementById('map-json');
+            const mapJson = mapTextEl ? mapTextEl.value : '';
+
+            if (!pkg) {
+                addLog('error', 'MAP_SET_GZ: 需要包名 (cortex-package 或 app-package)');
+                return;
+            }
+            if (!mapJson || !mapJson.trim()) {
+                addLog('error', 'MAP_SET_GZ: 请在文本框中粘贴 nav_map_*.json 内容');
+                return;
+            }
+
+            const payload = { package: pkg, map_json: mapJson };
+            sendCommand('/api/command/map_set_gz', payload, `MAP_SET_GZ ${pkg}`);
+            break;
+        }
+
+        case 'cortex_resolve_locator':
+        case 'cortex_tap_locator': {
+            const locator = buildLocatorPayload();
+            if (!locator) {
+                addLog('error', '请至少填写 locator 的一个字段 (resource_id/text/content_desc/class/bounds)');
+                return;
+            }
+            const endpoint = cmd === 'cortex_resolve_locator'
+                ? '/api/command/cortex_resolve_locator'
+                : '/api/command/cortex_tap_locator';
+            const label = cmd === 'cortex_resolve_locator'
+                ? 'CORTEX_RESOLVE_LOCATOR'
+                : 'CORTEX_TAP_LOCATOR';
+            sendCommand(endpoint, { locator }, label);
+            break;
+        }
+
+        case 'cortex_trace_pull': {
+            const maxLines = 200;
+            sendCommand('/api/command/cortex_trace_pull', { max_lines: maxLines }, `CORTEX_TRACE_PULL (${maxLines})`);
+            break;
+        }
+
+        case 'cortex_route_run': {
+            const pkgInput = document.getElementById('cortex-package');
+            const fallbackPkg = document.getElementById('app-package');
+            const pkg = (pkgInput && pkgInput.value.trim()) || (fallbackPkg && fallbackPkg.value.trim());
+
+            const targetPage = (document.getElementById('route-target-page')?.value || '').trim();
+            const startPage = (document.getElementById('route-start-page')?.value || '').trim();
+            const maxStepsRaw = document.getElementById('route-max-steps')?.value;
+            let maxSteps = parseInt(maxStepsRaw, 10);
+            if (Number.isNaN(maxSteps) || maxSteps <= 0) {
+                maxSteps = 16;
+            }
+
+            if (!pkg) {
+                addLog('error', 'CORTEX_ROUTE_RUN: 需要包名 (cortex-package 或 app-package)');
+                return;
+            }
+            if (!targetPage) {
+                addLog('error', 'CORTEX_ROUTE_RUN: 请填写 target_page');
+                return;
+            }
+
+            const payload = {
+                package: pkg,
+                target_page: targetPage,
+                max_steps: maxSteps,
+            };
+            if (startPage) {
+                payload.start_page = startPage;
+            }
+
+            const label = `CORTEX_ROUTE_RUN ${pkg}: home/start -> ${targetPage} (max_steps=${maxSteps})`;
+            sendCommand('/api/command/cortex_route_run', payload, label);
+            break;
+        }
+
+        case 'demo_route_run':
+            if (typeof runCortexRouteDemo === 'function') {
+                runCortexRouteDemo();
+            } else {
+                addLog('error', 'Demo(Route) 脚本未加载 (cortex_route_demo.js)');
+            }
+            break;
+
+        case 'demo_fill_bili_locator':
+            if (typeof fillBiliPresetLocator === 'function') {
+                fillBiliPresetLocator();
+            } else {
+                addLog('error', 'demo_fill_bili_locator 函数未定义');
+            }
+            break;
+
+        case 'demo_run_protocol':
+            if (typeof runCortexPresetDemo === 'function') {
+                runCortexPresetDemo(false);
+            } else {
+                addLog('error', 'demo_run_protocol 函数未定义');
+            }
+            break;
+
+        case 'demo_run_tap':
+            if (typeof runCortexPresetDemo === 'function') {
+                runCortexPresetDemo(true);
+            } else {
+                addLog('error', 'demo_run_tap 函数未定义');
+            }
+            break;
     }
 }
 
@@ -292,12 +419,12 @@ async function sendCommand(endpoint, params, displayName) {
     }
 
     updateStats();
-}
-
-/**
- * 显示响应详情
- */
-function displayResponse(response) {
+  }
+  
+  /**
+   * 显示响应详情
+   */
+  function displayResponse(response) {
     if (response.package !== undefined) {
         addLog('response', `   Package: ${response.package}`);
         addLog('response', `   Activity: ${response.activity}`);
@@ -317,16 +444,28 @@ function displayResponse(response) {
                 addLog('response', `   [${i}] bounds: (${r[0]},${r[1]})-(${r[2]},${r[3]})`);
             }
         });
-    }
-    if (response.length !== undefined && response.data === undefined) {
-        addLog('response', `   Response: ${response.length} bytes`);
-    }
-}
+      }
+      if (response.length !== undefined && response.data === undefined) {
+          addLog('response', `   Response: ${response.length} bytes`);
+      }
+      // Cortex Trace JSONL 可视化
+      if (typeof response.trace === 'string') {
+          try {
+              const events = parseTraceJsonl(response.trace);
+              addLog('info', `Trace: ${events.length} 条事件 (弹出窗口可用 ESC / 点击空白关闭)`);
+              if (events.length > 0) {
+                  showTraceViewer(events);
+              }
+          } catch (e) {
+              addLog('error', `Trace 解析失败: ${e && e.message ? e.message : e}`);
+          }
+      }
+  }
 
 /**
  * 检查连接状态
  */
-async function checkConnectionStatus() {
+  async function checkConnectionStatus() {
     try {
         const response = await fetch('/api/status');
         const status = await response.json();
@@ -455,8 +594,221 @@ async function takeScreenshot() {
         addLog('error', `X 请求失败: ${error.message}`);
     }
 
-    updateStats();
-}
+      updateStats();
+  }
+
+  /**
+   * 解析 Cortex Trace JSONL 为事件数组
+   */
+  function parseTraceJsonl(jsonl) {
+      if (!jsonl) return [];
+      const lines = jsonl.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+      const events = [];
+      for (const line of lines) {
+          try {
+              const obj = JSON.parse(line);
+              events.push(obj);
+          } catch (e) {
+              events.push({
+                  ts: null,
+                  event: 'parse_error',
+                  raw: line,
+                  error: String(e)
+              });
+          }
+      }
+      return events;
+  }
+
+  /**
+   * 显示 Cortex Trace Viewer (模态对话框)
+   */
+  function showTraceViewer(events) {
+      const modal = document.getElementById('trace-modal');
+      const table = document.getElementById('trace-table');
+      const statsDiv = document.getElementById('trace-stats');
+      const closeBtn = document.getElementById('btn-close-trace');
+      const searchInput = document.getElementById('trace-search');
+      const btnAll = document.getElementById('btn-trace-filter-all');
+      const btnRoute = document.getElementById('btn-trace-filter-route');
+      const btnLocator = document.getElementById('btn-trace-filter-locator');
+
+      if (!modal || !table) {
+          addLog('error', 'Trace Viewer DOM 未找到');
+          return;
+      }
+
+      let currentFilter = 'all';
+      let currentQuery = '';
+
+      statsDiv.textContent = `${events.length} 条事件`;
+
+      function applyFilter(ev) {
+          if (currentFilter === 'route') {
+              if (!ev.event) return false;
+              return ev.event.startsWith('route_');
+          }
+          if (currentFilter === 'locator') {
+              const locatorEvents = new Set([
+                  'resolve_begin',
+                  'resolve_ok',
+                  'resolve_fail',
+                  'tap',
+                  'tap_err',
+                  'route_resolve_locator',
+                  'route_resolve_retry'
+              ]);
+              return locatorEvents.has(ev.event);
+          }
+          return true;
+      }
+
+      function applyQuery(ev) {
+          if (!currentQuery) return true;
+          const q = currentQuery.toLowerCase();
+          try {
+              const text = JSON.stringify(ev).toLowerCase();
+              return text.includes(q);
+          } catch {
+              return false;
+          }
+      }
+
+      function buildSummary(ev) {
+          if (ev.event === 'parse_error') {
+              return ev.raw || '';
+          }
+          const shallow = {};
+          Object.keys(ev).forEach((k) => {
+              if (k === 'ts' || k === 'event') return;
+              shallow[k] = ev[k];
+          });
+          const keys = Object.keys(shallow);
+          if (!keys.length) return '';
+          // 简短摘要，避免一行太长
+          let s = JSON.stringify(shallow);
+          if (s.length > 160) {
+              s = s.slice(0, 160) + '...';
+          }
+          return s;
+      }
+
+      function render() {
+          table.innerHTML = '';
+          const filtered = events.filter(applyFilter).filter(applyQuery);
+          if (!filtered.length) {
+              table.innerHTML = '<div class="flat-empty">没有匹配的 trace 事件</div>';
+              statsDiv.textContent = `${events.length} 条事件 · 0 条匹配当前过滤`;
+              return;
+          }
+          statsDiv.textContent = `${events.length} 条事件 · 显示 ${filtered.length} 条`;
+
+          filtered.forEach((ev) => {
+              const row = document.createElement('div');
+              row.className = 'trace-row';
+
+              const ts = document.createElement('div');
+              ts.className = 'trace-ts';
+              ts.textContent = ev.ts || '-';
+
+              const name = document.createElement('div');
+              name.className = 'trace-event';
+              name.textContent = ev.event || '-';
+
+              const summary = document.createElement('div');
+              summary.className = 'trace-summary';
+              summary.textContent = buildSummary(ev);
+
+              row.appendChild(ts);
+              row.appendChild(name);
+              row.appendChild(summary);
+
+              let expanded = false;
+              let jsonDiv = null;
+              row.addEventListener('click', () => {
+                  expanded = !expanded;
+                  if (expanded) {
+                      row.classList.add('expanded');
+                      if (!jsonDiv) {
+                          jsonDiv = document.createElement('div');
+                          jsonDiv.className = 'trace-json';
+                          try {
+                              jsonDiv.textContent = JSON.stringify(ev, null, 2);
+                          } catch {
+                              jsonDiv.textContent = String(ev);
+                          }
+                          row.appendChild(jsonDiv);
+                      } else {
+                          jsonDiv.style.display = 'block';
+                      }
+                  } else {
+                      row.classList.remove('expanded');
+                      if (jsonDiv) {
+                          jsonDiv.style.display = 'none';
+                      }
+                  }
+              });
+
+              table.appendChild(row);
+          });
+      }
+
+      function setFilter(filter) {
+          currentFilter = filter;
+          [btnAll, btnRoute, btnLocator].forEach((btn) => {
+              if (!btn) return;
+              btn.classList.toggle('active', btn === (filter === 'all' ? btnAll : filter === 'route' ? btnRoute : btnLocator));
+          });
+          render();
+      }
+
+      if (btnAll && btnRoute && btnLocator) {
+          btnAll.onclick = () => setFilter('all');
+          btnRoute.onclick = () => setFilter('route');
+          btnLocator.onclick = () => setFilter('locator');
+      }
+
+      if (searchInput) {
+          searchInput.value = '';
+          searchInput.oninput = () => {
+              currentQuery = searchInput.value.trim();
+              render();
+          };
+      }
+
+      // 显示模态
+      modal.style.display = 'flex';
+
+      const closeModal = () => {
+          modal.style.display = 'none';
+          if (searchInput) {
+              searchInput.oninput = null;
+          }
+          if (btnAll) btnAll.onclick = null;
+          if (btnRoute) btnRoute.onclick = null;
+          if (btnLocator) btnLocator.onclick = null;
+          document.removeEventListener('keydown', escHandler);
+      };
+
+      if (closeBtn) {
+          closeBtn.onclick = closeModal;
+      }
+
+      modal.onclick = (e) => {
+          if (e.target === modal) {
+              closeModal();
+          }
+      };
+
+      const escHandler = (e) => {
+          if (e.key === 'Escape') {
+              closeModal();
+          }
+      };
+      document.addEventListener('keydown', escHandler);
+
+      render();
+  }
 
 /**
  * 显示截图预览
@@ -1289,3 +1641,104 @@ function showAppsViewer(apps, filter) {
         });
     };
 }
+
+/**
+ * 从表单构建 locator payload（只包含非空字段）
+ */
+function buildLocatorPayload() {
+    const rid = (document.getElementById('locator-resource-id')?.value || '').trim();
+    const text = (document.getElementById('locator-text')?.value || '').trim();
+    const desc = (document.getElementById('locator-content-desc')?.value || '').trim();
+    const cls = (document.getElementById('locator-class')?.value || '').trim();
+    const parentRid = (document.getElementById('locator-parent-rid')?.value || '').trim();
+
+    const lVal = document.getElementById('locator-bounds-left')?.value;
+    const tVal = document.getElementById('locator-bounds-top')?.value;
+    const rVal = document.getElementById('locator-bounds-right')?.value;
+    const bVal = document.getElementById('locator-bounds-bottom')?.value;
+
+    const locator = {};
+    if (rid) locator.resource_id = rid;
+    if (text) locator.text = text;
+    if (desc) locator.content_desc = desc;
+    if (cls) locator.class = cls;
+    if (parentRid) locator.parent_rid = parentRid;
+
+    const l = parseInt(lVal, 10);
+    const t = parseInt(tVal, 10);
+    const r = parseInt(rVal, 10);
+    const b = parseInt(bVal, 10);
+    if (!Number.isNaN(l) && !Number.isNaN(t) && !Number.isNaN(r) && !Number.isNaN(b)) {
+        locator.bounds_hint = [l, t, r, b];
+    }
+
+    return Object.keys(locator).length > 0 ? locator : null;
+}
+
+/**
+ * 预制：填充 B 站示例 locator（首页搜索框 expand_search）
+ */
+function fillBiliPresetLocator() {
+    const pkgInput = document.getElementById('cortex-package');
+    const appPkg = document.getElementById('app-package');
+    const defaultPkg = 'tv.danmaku.bili';
+
+    if (pkgInput && !pkgInput.value) pkgInput.value = defaultPkg;
+    if (appPkg && !appPkg.value) appPkg.value = defaultPkg;
+
+    const rid = document.getElementById('locator-resource-id');
+    const text = document.getElementById('locator-text');
+    const desc = document.getElementById('locator-content-desc');
+    const cls = document.getElementById('locator-class');
+    const parent = document.getElementById('locator-parent-rid');
+    const l = document.getElementById('locator-bounds-left');
+    const t = document.getElementById('locator-bounds-top');
+    const r = document.getElementById('locator-bounds-right');
+    const b = document.getElementById('locator-bounds-bottom');
+
+    if (rid) rid.value = 'tv.danmaku.bili:id/expand_search';
+    if (text) text.value = '';
+    if (desc) desc.value = '';
+    if (cls) cls.value = 'LinearLayout';
+    if (parent) parent.value = 'tv.danmaku.bili:id/expand_search_container';
+    if (l) l.value = '';
+    if (t) t.value = '';
+    if (r) r.value = '';
+    if (b) b.value = '';
+
+    addLog('info', '已填充 B 站示例 locator（首页搜索框 expand_search）');
+}
+
+/**
+ * Cortex 协议 Demo：先 resolve，再可选 tap，最后拉取 trace
+ */
+async function runCortexPresetDemo(includeTap) {
+    if (!state.connected) {
+        addLog('error', '未连接设备，无法运行 Demo');
+        return;
+    }
+
+    const pkgInput = document.getElementById('cortex-package');
+    const appPkg = document.getElementById('app-package');
+    let pkg = (pkgInput && pkgInput.value.trim()) || (appPkg && appPkg.value.trim());
+    if (!pkg) {
+        pkg = 'tv.danmaku.bili';
+    }
+    if (pkgInput && !pkgInput.value) pkgInput.value = pkg;
+    if (appPkg && !appPkg.value) appPkg.value = pkg;
+
+    const locator = buildLocatorPayload();
+    if (!locator) {
+        addLog('error', 'Demo locator 构建失败');
+        return;
+    }
+
+    await sendCommand('/api/command/cortex_resolve_locator', { locator }, 'DEMO CORTEX_RESOLVE_LOCATOR');
+
+    if (includeTap) {
+        await sendCommand('/api/command/cortex_tap_locator', { locator }, 'DEMO CORTEX_TAP_LOCATOR');
+    }
+
+    await sendCommand('/api/command/cortex_trace_pull', { max_lines: 200 }, 'DEMO CORTEX_TRACE_PULL');
+}
+

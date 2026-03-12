@@ -157,6 +157,7 @@ CMD_MAP_GET_INFO = 0x71        # Query current map info
 CMD_CORTEX_RESOLVE_LOCATOR = 0x72  # Resolve locator -> bounds (no action)
 CMD_CORTEX_TAP_LOCATOR = 0x73      # Resolve locator then tap
 CMD_CORTEX_TRACE_PULL = 0x74       # Pull last N trace lines (JSONL)
+CMD_CORTEX_ROUTE_RUN = 0x75        # Route-only execution (sync, from_page->to_page)
 
 # =============================================================================
 
@@ -198,6 +199,7 @@ IMPLEMENTED_COMMANDS_V1 = {
     CMD_CORTEX_RESOLVE_LOCATOR,
     CMD_CORTEX_TAP_LOCATOR,
     CMD_CORTEX_TRACE_PULL,
+    CMD_CORTEX_ROUTE_RUN,
 }
 
 # =============================================================================

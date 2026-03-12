@@ -1,13 +1,9 @@
 package com.lxb.server.cortex;
 
 import com.lxb.server.cortex.dump.DumpActionsParser;
-import com.lxb.server.cortex.dump.DumpHierarchyParser;
 import com.lxb.server.perception.PerceptionEngine;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,13 +42,9 @@ public class LocatorResolver {
         byte[] da = perceptionEngine.handleDumpActions(new byte[0]);
         List<DumpActionsParser.ActionNode> actions = DumpActionsParser.parse(da);
 
-        // 2) Dump hierarchy nodes (parent relationship)
-        byte[] dhPayload = buildDumpHierarchyReqPayload();
-        byte[] dh = perceptionEngine.handleDumpHierarchy(dhPayload);
-        List<DumpHierarchyParser.HierNode> hierarchy = DumpHierarchyParser.parse(dh);
-
-        // 3) Enrich action nodes with parent_rid from hierarchy via best-effort matching.
-        List<Candidate> candidates = enrich(actions, hierarchy);
+        // 2) Enrich action nodes with parent_rid inferred purely from dump_actions via
+        //    geometric containment between actionable nodes (aligned with Python side).
+        List<Candidate> candidates = enrichFromActions(actions);
 
         // Stage 1: strict self match (AND all non-empty fields)
         List<Candidate> stage1 = new ArrayList<>();
@@ -127,15 +119,6 @@ public class LocatorResolver {
         throw new IllegalStateException("locator match: ambiguous candidates=" + stage2.size());
     }
 
-    private static byte[] buildDumpHierarchyReqPayload() {
-        // format[1B]=2 (binary) + compress[1B]=1 (zlib) + max_depth[2B]=0 (unlimited)
-        ByteBuffer b = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
-        b.put((byte) 0x02);
-        b.put((byte) 0x01);
-        b.putShort((short) 0);
-        return b.array();
-    }
-
     private static boolean matchesSelf(Locator l, Candidate c) {
         String rid = Util.normalizeResourceId(l.resourceId);
         String cls = Util.normalizeClass(l.className);
@@ -150,37 +133,14 @@ public class LocatorResolver {
         return true;
     }
 
-    private static List<Candidate> enrich(
-            List<DumpActionsParser.ActionNode> actions,
-            List<DumpHierarchyParser.HierNode> hierarchy
-    ) {
-        // bounds -> list of hierarchy nodes (duplicates possible)
-        Map<BoundsKey, List<DumpHierarchyParser.HierNode>> byBounds = new HashMap<>();
-        for (DumpHierarchyParser.HierNode n : hierarchy) {
-            BoundsKey k = new BoundsKey(n.bounds);
-            List<DumpHierarchyParser.HierNode> lst = byBounds.get(k);
-            if (lst == null) {
-                lst = new ArrayList<>();
-                byBounds.put(k, lst);
-            }
-            lst.add(n);
-        }
-
+    /**
+     * Enrich DumpActions nodes with parent_rid inferred from other DumpActions nodes,
+     * using geometric containment to approximate the visual parent container.
+     */
+    private static List<Candidate> enrichFromActions(List<DumpActionsParser.ActionNode> actions) {
         List<Candidate> out = new ArrayList<>(actions.size());
         for (DumpActionsParser.ActionNode a : actions) {
-            BoundsKey k = new BoundsKey(a.bounds);
-            List<DumpHierarchyParser.HierNode> hs = byBounds.get(k);
-
-            String parentRid = "";
-            if (hs != null && !hs.isEmpty()) {
-                DumpHierarchyParser.HierNode best = pickBestHierarchyMatch(a, hs);
-                if (best != null && best.parentIndex != null) {
-                    int pIdx = best.parentIndex;
-                    if (pIdx >= 0 && pIdx < hierarchy.size()) {
-                        parentRid = hierarchy.get(pIdx).resourceId;
-                    }
-                }
-            }
+            String parentRid = inferParentRidFromActions(a, actions);
 
             out.add(new Candidate(
                     a.bounds,
@@ -194,24 +154,45 @@ public class LocatorResolver {
         return out;
     }
 
-    private static DumpHierarchyParser.HierNode pickBestHierarchyMatch(
-            DumpActionsParser.ActionNode a,
-            List<DumpHierarchyParser.HierNode> hs
+    /**
+     * Infer parent container resource_id for a given action node using geometric containment
+     * among all action nodes. This mirrors Python _infer_parent_resource_id behavior.
+     */
+    private static String inferParentRidFromActions(
+            DumpActionsParser.ActionNode child,
+            List<DumpActionsParser.ActionNode> all
     ) {
-        DumpHierarchyParser.HierNode best = null;
-        int bestScore = -1;
-        for (DumpHierarchyParser.HierNode h : hs) {
-            int score = 0;
-            if (!a.resourceId.isEmpty() && a.resourceId.equals(h.resourceId)) score += 3;
-            if (!a.className.isEmpty() && a.className.equals(h.className)) score += 2;
-            if (!a.contentDesc.isEmpty() && a.contentDesc.equals(h.contentDesc)) score += 2;
-            if (!a.text.isEmpty() && a.text.equals(h.text)) score += 1;
-            if (score > bestScore) {
-                bestScore = score;
-                best = h;
+        Bounds cb = child.bounds;
+        if (cb == null) return "";
+        int cl = cb.left;
+        int ct = cb.top;
+        int cr = cb.right;
+        int cbottom = cb.bottom;
+
+        String bestRid = "";
+        long bestArea = Long.MAX_VALUE;
+
+        for (DumpActionsParser.ActionNode node : all) {
+            if (node == child || node.bounds == null) continue;
+            Bounds b = node.bounds;
+            int nl = b.left;
+            int nt = b.top;
+            int nr = b.right;
+            int nb = b.bottom;
+
+            // strict containment: parent fully contains child and is strictly larger
+            if (nl <= cl && nt <= ct && nr >= cr && nb >= cbottom
+                    && (nl < cl || nt < ct || nr > cr || nb > cbottom)) {
+                String rid = node.resourceId != null ? node.resourceId : "";
+                if (rid.isEmpty()) continue;
+                long area = (long) (nr - nl) * (nb - nt);
+                if (area > 0 && area < bestArea) {
+                    bestArea = area;
+                    bestRid = rid;
+                }
             }
         }
-        return best;
+        return bestRid;
     }
 
     private static class Candidate {

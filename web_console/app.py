@@ -1380,6 +1380,278 @@ def cmd_dump_actions():
 
 
 # =============================================================================
+# Cortex / Map Debug Layer (0x70-0x7F)
+# =============================================================================
+
+def _project_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+
+def _pkg_dir_name(package_name: str) -> str:
+    return str(package_name or '').strip().replace('.', '_')
+
+
+def _is_safe_map_path(abs_path: str) -> bool:
+    roots = [
+        os.path.abspath(os.path.join(_project_root(), 'maps')),
+        os.path.abspath(os.path.join(_project_root(), 'sample_maps')),
+    ]
+    for root in roots:
+        if abs_path == root or abs_path.startswith(root + os.sep):
+            return True
+    return False
+
+
+def _find_latest_map_for_package(package_name: str) -> Optional[str]:
+    import glob
+
+    pkg_dir = _pkg_dir_name(package_name)
+    candidates = []
+    search_roots = [
+        os.path.join(_project_root(), 'maps'),
+        os.path.join(_project_root(), 'sample_maps'),
+    ]
+    for root in search_roots:
+        path = os.path.join(root, pkg_dir, 'nav_map_*.json')
+        for fp in glob.glob(path):
+            try:
+                candidates.append((os.path.getmtime(fp), fp))
+            except Exception:
+                pass
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def _load_map_json_text(package_name: str, data: dict) -> str:
+    """Load map json text from request body or known local map paths."""
+    raw_text = (data.get('map_json') or '').strip()
+    if raw_text:
+        # Validate user-provided text is JSON
+        json.loads(raw_text)
+        return raw_text
+
+    map_filepath = (data.get('map_filepath') or '').strip()
+    if map_filepath:
+        abs_filepath = os.path.abspath(map_filepath)
+        if not _is_safe_map_path(abs_filepath):
+            raise RuntimeError('非法 map_filepath：仅允许 maps/ 或 sample_maps/ 目录')
+        if not os.path.exists(abs_filepath):
+            raise RuntimeError(f'map 文件不存在: {abs_filepath}')
+        with open(abs_filepath, 'r', encoding='utf-8') as f:
+            obj = json.load(f)
+        return json.dumps(obj, ensure_ascii=False)
+
+    latest = _find_latest_map_for_package(package_name)
+    if latest:
+        with open(latest, 'r', encoding='utf-8') as f:
+            obj = json.load(f)
+        return json.dumps(obj, ensure_ascii=False)
+
+    raise RuntimeError(
+        f'未找到可用 map：package={package_name}，可传 map_json 或 map_filepath'
+    )
+
+
+@app.route('/api/command/map_get_info', methods=['POST'])
+def cmd_map_get_info():
+    error_response = _require_client_response()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    package_name = (data.get('package') or '').strip()
+    if not package_name:
+        return jsonify({'success': False, 'message': 'package is required'}), 400
+
+    try:
+        info = client.map_get_info(package_name)
+        ok = bool(info.get('ok'))
+        return jsonify({
+            'success': ok,
+            'message': f'MAP_GET_INFO {"成功" if ok else "失败"}: {package_name}',
+            'response': info
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/map_set_gz', methods=['POST'])
+def cmd_map_set_gz():
+    error_response = _require_client_response()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    package_name = (data.get('package') or '').strip()
+    if not package_name:
+        return jsonify({'success': False, 'message': 'package is required'}), 400
+
+    try:
+        map_json_text = _load_map_json_text(package_name, data)
+        result = client.map_set_gz(package_name, map_json_text)
+        ok = bool(result.get('ok'))
+        return jsonify({
+            'success': ok,
+            'message': f'MAP_SET_GZ {"成功" if ok else "失败"}: {package_name}',
+            'response': result
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/cortex_resolve_locator', methods=['POST'])
+def cmd_cortex_resolve_locator():
+    error_response = _require_client_response()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    locator = data.get('locator') or {}
+    if not isinstance(locator, dict) or not locator:
+        return jsonify({'success': False, 'message': 'locator is required'}), 400
+
+    try:
+        result = client.cortex_resolve_locator(locator)
+        ok = bool(result.get('ok'))
+        msg = 'CORTEX_RESOLVE_LOCATOR 成功' if ok else f'CORTEX_RESOLVE_LOCATOR 失败: {result.get("err", "")}'
+        return jsonify({
+            'success': ok,
+            'message': msg,
+            'response': result
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/cortex_tap_locator', methods=['POST'])
+def cmd_cortex_tap_locator():
+    error_response = _require_client_response()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    locator = data.get('locator') or {}
+    if not isinstance(locator, dict) or not locator:
+        return jsonify({'success': False, 'message': 'locator is required'}), 400
+
+    try:
+        result = client.cortex_tap_locator(locator)
+        ok = bool(result.get('ok'))
+        msg = 'CORTEX_TAP_LOCATOR 成功' if ok else f'CORTEX_TAP_LOCATOR 失败: {result.get("err", "")}'
+        return jsonify({
+            'success': ok,
+            'message': msg,
+            'response': result
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/cortex_trace_pull', methods=['POST'])
+def cmd_cortex_trace_pull():
+    error_response = _require_client_response()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    max_lines = int(data.get('max_lines', 200))
+    max_lines = max(1, min(max_lines, 1000))
+
+    try:
+        trace = client.cortex_trace_pull(max_lines=max_lines)
+        lines = [x for x in trace.splitlines() if x.strip()]
+        return jsonify({
+            'success': True,
+            'message': f'CORTEX_TRACE_PULL 成功: {len(lines)} 行',
+            'response': {
+                'max_lines': max_lines,
+                'line_count': len(lines),
+                'trace': trace
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/command/cortex_route_run', methods=['POST'])
+def cmd_cortex_route_run():
+    """端侧 route_run：根据 map 从 home/start_page 路由到 target_page。"""
+    error_response = _require_client_response()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    package_name = (data.get('package') or '').strip()
+    target_page = (data.get('target_page') or '').strip()
+    start_page = (data.get('start_page') or '').strip()
+    try:
+        max_steps = int(data.get('max_steps', 16) or 16)
+    except Exception:
+        max_steps = 16
+    max_steps = max(1, min(int(max_steps), 128))
+
+    if not package_name:
+        return jsonify({'success': False, 'message': 'package is required'}), 400
+    if not target_page:
+        return jsonify({'success': False, 'message': 'target_page is required'}), 400
+
+    try:
+        if start_page:
+            result = client.cortex_route_run(package_name, target_page, max_steps=max_steps, start_page=start_page)
+        else:
+            result = client.cortex_route_run(package_name, target_page, max_steps=max_steps)
+        ok = bool(result.get('ok'))
+        steps = result.get('steps') or []
+        if ok:
+            msg = f'CORTEX_ROUTE_RUN 成功: {result.get("from_page")} -> {result.get("to_page")}, steps={len(steps)}'
+        else:
+            reason = result.get('reason', '') or 'unknown'
+            msg = f'CORTEX_ROUTE_RUN 失败: {reason}'
+        return jsonify({
+            'success': ok,
+            'message': msg,
+            'response': result
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+    data = request.json or {}
+    package_name = (data.get('package') or '').strip()
+    from_page = (data.get('from_page') or '').strip()
+    to_page = (data.get('to_page') or '').strip()
+    try:
+        max_steps = int(data.get('max_steps', 16) or 16)
+    except Exception:
+        max_steps = 16
+    max_steps = max(1, min(int(max_steps), 128))
+
+    if not package_name:
+        return jsonify({'success': False, 'message': 'package is required'}), 400
+    if not from_page or not to_page:
+        return jsonify({'success': False, 'message': 'from_page 和 to_page 均为必填'}), 400
+
+    try:
+        result = client.cortex_route_run(package_name, from_page, to_page, max_steps=max_steps)
+        ok = bool(result.get('ok'))
+        steps = result.get('steps') or []
+        if ok:
+            msg = f'CORTEX_ROUTE_RUN 成功: {from_page} -> {to_page}, steps={len(steps)}'
+        else:
+            reason = result.get('reason', '') or 'unknown'
+            msg = f'CORTEX_ROUTE_RUN 失败: {reason}'
+        return jsonify({
+            'success': ok,
+            'message': msg,
+            'response': result
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# =============================================================================
 # Lifecycle Layer (0x40-0x4F)
 # =============================================================================
 

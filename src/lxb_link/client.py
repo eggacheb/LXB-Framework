@@ -59,6 +59,7 @@ from .constants import (
     CMD_CORTEX_RESOLVE_LOCATOR,
     CMD_CORTEX_TAP_LOCATOR,
     CMD_CORTEX_TRACE_PULL,
+    CMD_CORTEX_ROUTE_RUN,
     # Match types for FIND_NODE
     MATCH_EXACT_TEXT,
     MATCH_CONTAINS_TEXT,
@@ -1219,6 +1220,44 @@ class LXBLinkClient:
         payload = struct.pack(">H", n)
         resp = self._cmd(CMD_CORTEX_TRACE_PULL, payload, timeout_factor=3.0)
         return resp.decode("utf-8", errors="replace")
+
+    def cortex_route_run(
+        self,
+        package: str,
+        target_page: str,
+        max_steps: int = 16,
+        start_page: str | None = None,
+    ) -> dict:
+        """
+        Run route-only execution on device (sync).
+
+        This aligns with Python RouteThenActCortex semantics:
+        - If start_page is None: device infers home page from map, then BFS to target_page.
+        - If start_page is provided: BFS from start_page to target_page.
+
+        Args:
+            package: App package name
+            target_page: Map page id to reach
+            max_steps: BFS/path steps upper bound (default 16)
+            start_page: Optional explicit start page id (None = infer home)
+
+        Returns:
+            JSON dict with route result and step summaries.
+        """
+        self._ensure_connected()
+        import json
+
+        payload_dict = {
+            "package": package,
+            "target_page": target_page,
+            "max_steps": int(max_steps),
+        }
+        if start_page:
+            payload_dict["start_page"] = start_page
+
+        payload = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
+        resp = self._cmd(CMD_CORTEX_ROUTE_RUN, payload, timeout_factor=8.0)
+        return json.loads(resp.decode("utf-8", errors="replace"))
 
     def _parse_dump_actions_response(self, data: bytes) -> dict:
         """
