@@ -36,6 +36,7 @@ public class CortexFacade {
     private final LocatorResolver locatorResolver;
     private final LlmClient llmClient;
     private final CortexFsmEngine fsmEngine;
+    private final CortexTaskManager taskManager;
 
     public CortexFacade(PerceptionEngine perceptionEngine, ExecutionEngine executionEngine) {
         this.perceptionEngine = perceptionEngine;
@@ -45,6 +46,7 @@ public class CortexFacade {
         this.locatorResolver = new LocatorResolver(perceptionEngine, trace);
         this.llmClient = new LlmClient();
         this.fsmEngine = new CortexFsmEngine(perceptionEngine, executionEngine, mapManager, trace);
+        this.taskManager = new CortexTaskManager(fsmEngine);
     }
 
     public byte[] handleMapSetGz(byte[] payload) {
@@ -328,7 +330,9 @@ public class CortexFacade {
      *   "user_task": "open xxx",
      *   "package": "tv.danmaku.bili",    // optional, if omitted INIT+APP_RESOLVE will be extended later
      *   "map_path": "/data/local/tmp/nav_map.json", // optional, reserved for future
-     *   "start_page": "bilibili_home"    // optional
+     *   "start_page": "bilibili_home",   // optional
+     *   "trace_mode": "push",            // optional: "push" to enable UDP trace streaming
+     *   "trace_udp_port": 23456          // optional: Android app local UDP port for trace push
      * }
      *
      * For now this wires only INIT -> APP_RESOLVE, and requires package to be provided.
@@ -341,22 +345,151 @@ public class CortexFacade {
             String pkg = stringOrEmpty(req.get("package"));
             String mapPath = stringOrEmpty(req.get("map_path"));
             String startPage = stringOrEmpty(req.get("start_page"));
+            String traceMode = stringOrEmpty(req.get("trace_mode"));
+            int traceUdpPort = toInt(req.get("trace_udp_port"), 0);
 
             if (userTask.isEmpty()) {
                 return err("user_task is required");
             }
 
-            Map<String, Object> result = fsmEngine.run(
+            String taskId = taskManager.submitTask(
                     userTask,
                     pkg,
                     mapPath.isEmpty() ? null : mapPath,
-                    startPage.isEmpty() ? null : startPage
+                    startPage.isEmpty() ? null : startPage,
+                    traceMode.isEmpty() ? null : traceMode,
+                    traceUdpPort > 0 ? traceUdpPort : null
             );
-            return ok(Json.stringify(result));
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("task_id", taskId);
+            out.put("status", "submitted");
+            out.put("user_task", userTask);
+            if (!pkg.isEmpty()) {
+                out.put("package", pkg);
+            }
+            return ok(Json.stringify(out));
         } catch (Exception e) {
             Map<String, Object> ev = new LinkedHashMap<>();
             ev.put("err", String.valueOf(e));
             trace.event("cortex_fsm_err", ev);
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * Task status query entry point.
+     *
+     * Payload JSON UTF-8:
+     * {
+     *   "task_id": "<uuid>"
+     * }
+     *
+     * Response JSON:
+     * {
+     *   "found": true/false,
+     *   "task_id": "...",
+     *   "user_task": "...",
+     *   "state": "PENDING|RUNNING|COMPLETED|FAILED",
+     *   "created_at": 0,
+     *   "started_at": 0,
+     *   "finished_at": 0,
+     *   "final_state": "...",
+     *   "reason": "..."
+     * }
+     */
+    public byte[] handleCortexTaskStatus(byte[] payload) {
+        try {
+            String s = new String(payload, StandardCharsets.UTF_8);
+            Map<String, Object> req = Json.parseObject(s);
+            String taskId = stringOrEmpty(req.get("task_id"));
+
+            Map<String, Object> status = taskManager.getTaskStatus(taskId);
+            return ok(Json.stringify(status));
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("err", String.valueOf(e));
+            trace.event("cortex_task_status_err", ev);
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * Request cancellation of the currently running Cortex FSM task.
+     *
+     * Payload JSON UTF-8 (optional):
+     * {
+     *   "reason": "user_cancel"
+     * }
+     *
+     * For now this applies to the single worker thread only and does not
+     * require a task_id. It is safe to call even if no task is running.
+     */
+    public byte[] handleCortexFsmCancel(byte[] payload) {
+        try {
+            taskManager.requestCancel();
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("source", "remote");
+            ev.put("reason", "user_cancel");
+            trace.event("fsm_cancel_requested", ev);
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("reason", "cancel_requested");
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("err", String.valueOf(e));
+            trace.event("fsm_cancel_request_err", ev);
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * List recent Cortex FSM tasks.
+     *
+     * Payload JSON UTF-8 (optional):
+     * {
+     *   "limit": 50
+     * }
+     *
+     * Response JSON:
+     * {
+     *   "ok": true,
+     *   "tasks": [
+     *     {
+     *       "task_id": "...",
+     *       "user_task": "...",
+     *       "state": "PENDING|RUNNING|COMPLETED|FAILED|CANCELLED",
+     *       "created_at": 0,
+     *       "started_at": 0,
+     *       "finished_at": 0,
+     *       "final_state": "...",
+     *       "reason": "...",
+     *       "package_name": "...",
+     *       "target_page": "..."
+     *     },
+     *     ...
+     *   ]
+     * }
+     */
+    public byte[] handleCortexTaskList(byte[] payload) {
+        try {
+            int limit = 50;
+            if (payload != null && payload.length > 0) {
+                String s = new String(payload, StandardCharsets.UTF_8);
+                Map<String, Object> req = Json.parseObject(s);
+                limit = toInt(req.get("limit"), 50);
+            }
+            java.util.List<Map<String, Object>> tasks = taskManager.listRecentTasks(limit);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("tasks", tasks);
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("err", String.valueOf(e));
+            trace.event("cortex_task_list_err", ev);
             return err(String.valueOf(e));
         }
     }

@@ -186,6 +186,15 @@ public class CommandDispatcher {
                 case CommandIds.CMD_CORTEX_FSM_RUN:
                     response = cortexFacade.handleCortexFsmRun(payload);
                     break;
+                case CommandIds.CMD_CORTEX_TASK_STATUS:
+                    response = cortexFacade.handleCortexTaskStatus(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_FSM_CANCEL:
+                    response = cortexFacade.handleCortexFsmCancel(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_TASK_LIST:
+                    response = cortexFacade.handleCortexTaskList(payload);
+                    break;
 
                 default:
                     System.out.println(TAG + " Unimplemented command: 0x" +

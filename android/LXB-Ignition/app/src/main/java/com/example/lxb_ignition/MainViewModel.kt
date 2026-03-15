@@ -2,15 +2,17 @@ package com.example.lxb_ignition
 
 import android.app.Application
 import android.content.Context
-import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lxb_ignition.service.LocalLinkClient
-import com.example.lxb_ignition.service.TcpMockService
 import com.example.lxb_ignition.shizuku.ShizukuManager
-import com.lxb.server.protocol.CommandIds
 import com.lxb.server.cortex.LlmClient
+import com.lxb.server.protocol.CommandIds
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,7 +30,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val PREFS_NAME = "lxb_config"
         private const val KEY_LXB_PORT = "lxb_port"
-        private const val KEY_TCP_MOCK_PORT = "tcp_mock_port"
         private const val KEY_SERVER_IP = "server_ip"
         private const val KEY_SERVER_PORT = "server_port"
 
@@ -38,40 +39,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // Keep in sync with LlmConfig.DEFAULT_CONFIG_PATH in lxb-core
         private const val LLM_CONFIG_PATH = "/data/local/tmp/lxb-llm-config.json"
+
+        // Local UDP port for trace push from lxb-core.
+        private const val TRACE_UDP_PORT = 23456
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     val shizukuManager = ShizukuManager(application)
 
-    // 状态
+    // Shizuku / lxb-core state
     private val _state = MutableStateFlow(ShizukuManager.State.UNAVAILABLE)
     val state: StateFlow<ShizukuManager.State> = _state.asStateFlow()
 
-    private val _statusMessage = MutableStateFlow("初始化中...")
+    private val _statusMessage = MutableStateFlow("Initializing...")
     val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
 
-    // 配置：lxb-core 服务 / TCP mock
+    // Config: lxb-core server
     val lxbPort = MutableStateFlow(prefs.getString(KEY_LXB_PORT, "12345") ?: "12345")
-    val tcpMockPort = MutableStateFlow(prefs.getString(KEY_TCP_MOCK_PORT, "22345") ?: "22345")
-    val tcpMockRunning = MutableStateFlow(false)
 
-    // 配置：PC 端 web_console
+    // Config: PC web_console (kept for compatibility; Android no longer sends tasks by default)
     val serverIp = MutableStateFlow(prefs.getString(KEY_SERVER_IP, "") ?: "")
     val serverPort = MutableStateFlow(prefs.getString(KEY_SERVER_PORT, "5000") ?: "5000")
 
-    // 配置：LLM（端侧直连云端）
+    // Config: LLM (device-side direct call)
     val llmBaseUrl = MutableStateFlow(prefs.getString(KEY_LLM_BASE_URL, "") ?: "")
     val llmApiKey = MutableStateFlow(prefs.getString(KEY_LLM_API_KEY, "") ?: "")
     val llmModel = MutableStateFlow(prefs.getString(KEY_LLM_MODEL, "gpt-4o-mini") ?: "gpt-4o-mini")
     val llmTestResult = MutableStateFlow("")
 
-    // 控制 Tab
+    // Control tab
     val requirement = MutableStateFlow("")
     val sendResult = MutableStateFlow("")
+
+    // Chat view: one-shot task session (no cross-task context)
+    enum class ChatRole { USER, SYSTEM }
+
+    data class ChatMessage(
+        val id: Long,
+        val role: ChatRole,
+        val text: String,
+        val ts: Long = System.currentTimeMillis()
+    )
+
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
+    private var nextMsgId: Long = 1L
+    private var activeTraceJob: Job? = null
+
+    // Tasks tab: recent task list (lightweight snapshot).
+    data class TaskSummary(
+        val taskId: String,
+        val userTask: String,
+        val state: String,
+        val finalState: String,
+        val reason: String,
+        val packageName: String,
+        val targetPage: String,
+        val createdAt: Long,
+        val finishedAt: Long
+    )
+
+    private val _taskList = MutableStateFlow<List<TaskSummary>>(emptyList())
+    val taskList: StateFlow<List<TaskSummary>> = _taskList.asStateFlow()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -92,7 +125,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         shizukuManager.attach()
     }
 
-    // 操作：Shizuku / lxb-core
+    // ----- Shizuku / lxb-core operations -----
 
     fun requestShizukuPermission() {
         shizukuManager.requestPermission()
@@ -100,7 +133,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startServer() {
         val port = lxbPort.value.toIntOrNull() ?: run {
-            appendLog("错误：lxb-core 端口无效")
+            appendLog("Invalid lxb-core port")
+            appendSystemMessage("Invalid lxb-core port, please check UDP port in Config tab.")
             return
         }
         saveConfig()
@@ -115,49 +149,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startTcpMockService() {
-        val port = tcpMockPort.value.toIntOrNull() ?: run {
-            appendLog("错误：TCP mock 端口无效")
-            return
-        }
-        saveConfig()
-        val app = getApplication<Application>()
-        val intent = Intent(app, TcpMockService::class.java).apply {
-            action = TcpMockService.ACTION_START
-            putExtra(TcpMockService.EXTRA_PORT, port)
-        }
-        app.startForegroundService(intent)
-        tcpMockRunning.value = true
-        appendLog("[TCP-MOCK] 已启动，端口=$port")
-    }
-
-    fun stopTcpMockService() {
-        val app = getApplication<Application>()
-        val intent = Intent(app, TcpMockService::class.java).apply {
-            action = TcpMockService.ACTION_STOP
-        }
-        app.startService(intent)
-        tcpMockRunning.value = false
-        appendLog("[TCP-MOCK] 已停止")
-    }
-
-    // 控制 Tab: 把 requirement 发到 PC 端 web_console
+    // ----- Control tab: send task to PC web_console (legacy) -----
 
     fun sendRequirement() {
         val req = requirement.value.trim()
         if (req.isEmpty()) {
-            sendResult.value = "请先输入需求内容"
+            sendResult.value = "Please enter a task description first."
+            appendSystemMessage("Please enter a task description before sending to PC.")
             return
         }
         val ip = serverIp.value.trim()
         val port = serverPort.value.trim()
         if (ip.isEmpty()) {
-            sendResult.value = "请先在【配置】中填写 web_console 所在 PC 的 IP"
+            sendResult.value = "Please fill web_console IP in Config tab first."
+            appendSystemMessage("web_console IP is missing. Please fill it in Config tab.")
             return
         }
         saveConfig()
         viewModelScope.launch {
-            sendResult.value = "发送中..."
+            sendResult.value = "Sending to PC..."
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val url = "http://$ip:$port/api/cortex/fsm/start"
@@ -168,104 +178,447 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val body = json.toRequestBody("application/json".toMediaType())
                     val request = Request.Builder().url(url).post(body).build()
                     httpClient.newCall(request).execute().use { resp ->
-                        "HTTP ${resp.code}: ${resp.body?.string()?.take(200) ?: "(无响应体)"}"
+                        "HTTP ${resp.code}: ${resp.body?.string()?.take(200) ?: "(empty body)"}"
                     }
-                }.getOrElse { e -> "发送失败: ${e.message}" }
+                }.getOrElse { e -> "Send failed: ${e.message}" }
             }
             sendResult.value = result
             appendLog("[REQ] $result")
+            appendSystemMessage("Task sent to PC web_console: $result")
         }
     }
 
-    /**
-     * 端侧直连 lxb-core，运行 Cortex FSM。
-     *
-     * 步骤：
-     *  1) 检查 lxb-core 是否已运行（Shizuku）。
-     *  2) 通过本机 UDP 向 127.0.0.1:lxbPort 发送 CMD_CORTEX_FSM_RUN。
-     *  3) 将简要结果显示在 sendResult，并写入日志。
-     */
+    // ----- Control tab: run Cortex FSM on device -----
+
     fun runRequirementOnDevice() {
         val req = requirement.value.trim()
         if (req.isEmpty()) {
-            sendResult.value = "请先输入需求内容"
+            sendResult.value = "Please enter a task description first."
+            appendSystemMessage("Please enter a task description before running on device.")
             return
         }
         val port = lxbPort.value.toIntOrNull() ?: run {
-            sendResult.value = "lxb-core 端口无效"
+            sendResult.value = "Invalid lxb-core port"
+            appendSystemMessage("Invalid lxb-core port, please check UDP port in Config tab.")
             return
         }
         saveConfig()
 
         viewModelScope.launch {
-            sendResult.value = "端侧 FSM 运行中..."
+            appendUserMessage(req)
+            appendSystemMessage("Task received, checking lxb-core server status...")
+            sendResult.value = "Submitting task to device..."
 
-            val msg = withContext(Dispatchers.IO) {
-                val running = runCatching { shizukuManager.isServerRunning() }.getOrDefault(false)
-                if (!running) {
-                    return@withContext "lxb-core 未运行，请先在上方启动服务"
-                }
+            val running = withContext(Dispatchers.IO) {
+                runCatching { shizukuManager.isServerRunning() }.getOrDefault(false)
+            }
+            if (!running) {
+                val err = "lxb-core is not running, please start the service on the home tab."
+                sendResult.value = err
+                appendLog("[FSM] $err")
+                appendSystemMessage("Server is not running, please start the service first.")
+                return@launch
+            }
 
-                return@withContext runCatching {
+            appendSystemMessage("Server is running, calling Cortex FSM on device...")
+
+            // Ensure UDP trace listener is running so that chat shows live FSM progress.
+            ensureTraceUdpListener()
+
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
                     LocalLinkClient("127.0.0.1", port).use { client ->
-                        // 可选握手，仅做连通性检查（失败时不中断）
+                        // Best-effort handshake, do not fail the whole flow if it crashes.
                         runCatching { client.handshake() }
 
                         val json = org.json.JSONObject()
                             .put("user_task", req)
+                            .put("trace_mode", "push")
+                            .put("trace_udp_port", TRACE_UDP_PORT)
                             .toString()
                         val payload = json.toByteArray(Charsets.UTF_8)
 
                         val respBytes = client.sendCommand(
                             CommandIds.CMD_CORTEX_FSM_RUN,
                             payload,
-                            timeoutMs = 20_000
+                            timeoutMs = 10_000
                         )
                         val text = respBytes.toString(Charsets.UTF_8)
-
                         val obj = runCatching { org.json.JSONObject(text) }.getOrNull()
                         if (obj == null) {
-                            "FSM 返回非 JSON 响应: ${text.take(160)}"
+                            Pair("Invalid response: ${text.take(160)}", "")
                         } else {
+                            val ok = obj.optBoolean("ok", false)
                             val status = obj.optString("status", "")
-                            val state = obj.optString("state", "")
-                            val pkg = obj.optString("package_name", "")
-                            val target = obj.optString("target_page", "")
-                            val reason = obj.optString("reason", "")
-                            if (status == "success") {
-                                "端侧 FSM 成功: package=${pkg.ifEmpty { "<auto>" }}, target_page=${target.ifEmpty { "<unknown>" }}, state=${if (state.isEmpty()) "FINISH" else state}"
+                            val taskId = obj.optString("task_id", "")
+                            if (ok && status == "submitted" && taskId.isNotEmpty()) {
+                                Pair("Task submitted: $taskId", taskId)
                             } else {
-                                "端侧 FSM 失败: state=${if (state.isEmpty()) "UNKNOWN" else state}, reason=${reason.ifEmpty { "unknown" }}"
+                                Pair("Task submission failed: ${text.take(200)}", "")
                             }
                         }
                     }
                 }.getOrElse { e ->
-                    "端侧 FSM 调用失败: ${e.message ?: e.toString()}"
+                    Pair("Task submission failed: ${e.message ?: e.toString()}", "")
                 }
             }
 
+            val msg = result.first
+            val taskId = result.second
+
             sendResult.value = msg
             appendLog("[FSM] $msg")
+            appendSystemMessage(msg)
+
+            if (taskId.isNotEmpty()) {
+                appendSystemMessage("Task id: $taskId")
+            }
         }
     }
 
+    fun cancelCurrentTaskOnDevice() {
+        val port = lxbPort.value.toIntOrNull() ?: run {
+            appendSystemMessage("Invalid lxb-core port, cannot cancel task.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                LocalLinkClient("127.0.0.1", port).use { client ->
+                    runCatching { client.handshake() }
+                    client.sendCommand(
+                        CommandIds.CMD_CORTEX_FSM_CANCEL,
+                        ByteArray(0),
+                        timeoutMs = 2_000
+                    )
+                }
+            }.onSuccess {
+                appendLog("[FSM] Cancel requested.")
+                withContext(Dispatchers.Main) {
+                    appendSystemMessage("Cancel requested for current task.")
+                }
+            }.onFailure { e ->
+                appendLog("[FSM] Cancel request failed: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    appendSystemMessage("Failed to send cancel request: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun refreshTaskListOnDevice() {
+        val port = lxbPort.value.toIntOrNull() ?: run {
+            appendSystemMessage("Invalid lxb-core port, cannot refresh task list.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                LocalLinkClient("127.0.0.1", port).use { client ->
+                    runCatching { client.handshake() }
+                    val payload = org.json.JSONObject()
+                        .put("limit", 50)
+                        .toString()
+                        .toByteArray(Charsets.UTF_8)
+                    val resp = client.sendCommand(
+                        CommandIds.CMD_CORTEX_TASK_LIST,
+                        payload,
+                        timeoutMs = 5_000
+                    )
+                    val text = resp.toString(Charsets.UTF_8)
+                    val obj = runCatching { org.json.JSONObject(text) }.getOrNull()
+                        ?: return@runCatching Pair("Invalid task list response: ${text.take(160)}", emptyList<TaskSummary>())
+                    if (!obj.optBoolean("ok", false)) {
+                        return@runCatching Pair("Task list query failed: ${text.take(160)}", emptyList<TaskSummary>())
+                    }
+                    val arr = obj.optJSONArray("tasks") ?: org.json.JSONArray()
+                    val items = mutableListOf<TaskSummary>()
+                    for (i in 0 until arr.length()) {
+                        val t = arr.optJSONObject(i) ?: continue
+                        val id = t.optString("task_id", "")
+                        if (id.isEmpty()) continue
+                        val summary = TaskSummary(
+                            taskId = id,
+                            userTask = t.optString("user_task", ""),
+                            state = t.optString("state", ""),
+                            finalState = t.optString("final_state", ""),
+                            reason = t.optString("reason", ""),
+                            packageName = t.optString("package_name", ""),
+                            targetPage = t.optString("target_page", ""),
+                            createdAt = t.optLong("created_at", 0L),
+                            finishedAt = t.optLong("finished_at", 0L)
+                        )
+                        items.add(summary)
+                    }
+                    Pair("Task list refreshed: ${items.size} items.", items as List<TaskSummary>)
+                }
+            }.getOrElse { e -> Pair("Task list query failed: ${e.message}", emptyList<TaskSummary>()) }
+
+            withContext(Dispatchers.Main) {
+                _taskList.value = result.second
+                appendLog("[FSM] ${result.first}")
+                appendSystemMessage(result.first)
+            }
+        }
+    }
+
+    fun showTaskSummaryInChat(task: TaskSummary) {
+        val text = buildString {
+            append("Task summary:\n")
+            append("id=").append(task.taskId).append("\n")
+            if (task.userTask.isNotEmpty()) {
+                append("task=").append(task.userTask).append("\n")
+            }
+            append("state=").append(task.state)
+            if (task.finalState.isNotEmpty()) {
+                append(" (final=").append(task.finalState).append(")")
+            }
+            if (task.reason.isNotEmpty()) {
+                append(", reason=").append(task.reason)
+            }
+            append("\n")
+            if (task.packageName.isNotEmpty()) {
+                append("package=").append(task.packageName).append("\n")
+            }
+            if (task.targetPage.isNotEmpty()) {
+                append("target_page=").append(task.targetPage).append("\n")
+            }
+        }
+        appendSystemMessage(text.trim())
+    }
+
     /**
-     * 写入端侧 LLM 配置并直接测试云端 LLM 是否可用。
+     * Start a background job that listens for trace events pushed via UDP
+     * from lxb-core and maps them to chat messages.
      */
+    private fun ensureTraceUdpListener(): Job {
+        val existing = activeTraceJob
+        if (existing != null && existing.isActive) {
+            return existing
+        }
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            var socket: DatagramSocket? = null
+            try {
+                socket = DatagramSocket(TRACE_UDP_PORT)
+                val buffer = ByteArray(64 * 1024)
+                while (isActive) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    socket.receive(packet)
+                    val text = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
+                    val obj = runCatching { org.json.JSONObject(text) }.getOrNull() ?: continue
+                    withContext(Dispatchers.Main) {
+                        appendChatMessageFromTrace(obj)
+                    }
+                }
+            } catch (e: Exception) {
+                appendLog("[TRACE_PUSH] listener error: ${e.message}")
+            } finally {
+                socket?.close()
+            }
+        }
+        activeTraceJob = job
+        return job
+    }
+
+    /**
+     * Map a single trace event JSON object into a human-readable chat message.
+     * Uses seenKeys to avoid spamming duplicate messages for the same logical stage.
+     */
+    private fun appendChatMessageFromTrace(obj: org.json.JSONObject) {
+        val event = obj.optString("event", "")
+        if (event.isEmpty()) return
+
+        when (event) {
+            "fsm_state_enter" -> {
+                val state = obj.optString("state", "")
+                when (state) {
+                    "APP_RESOLVE" -> appendSystemMessage("APP_RESOLVE: selecting the best app for this task...")
+                    "ROUTE_PLAN" -> appendSystemMessage("ROUTE_PLAN: planning navigation route using map...")
+                    "ROUTING" -> appendSystemMessage("ROUTING: executing route on device...")
+                    "VISION_ACT" -> appendSystemMessage("VISION_ACT: entering vision-action loop (LLM + VLM).")
+                    "FINISH" -> appendSystemMessage("Task finished successfully.")
+                    "FAIL" -> appendSystemMessage("Task finished with failure.")
+                }
+            }
+
+            "fsm_init_ready" -> {
+                val deviceInfo = obj.optJSONObject("device_info")
+                val width = deviceInfo?.optInt("width", 0) ?: 0
+                val height = deviceInfo?.optInt("height", 0) ?: 0
+                val apps = obj.optInt("app_candidates", 0)
+                appendSystemMessage(
+                    "Device ready: ${width}x$height, scanned $apps candidate apps."
+                )
+            }
+
+            "fsm_app_resolve_done" -> {
+                val pkg = obj.optString("package", "")
+                val source = obj.optString("source", "")
+                val sourceLabel = when (source) {
+                    "llm" -> "via LLM"
+                    "fallback" -> "via fallback heuristic"
+                    else -> ""
+                }
+                val base = if (pkg.isNotEmpty()) {
+                    "App selected: $pkg"
+                } else {
+                    "App selected."
+                }
+                val msg = if (sourceLabel.isNotEmpty()) {
+                    "$base ($sourceLabel)."
+                } else {
+                    base
+                }
+                appendSystemMessage(msg)
+            }
+
+            "fsm_app_resolve_failed" -> {
+                val reason = obj.optString("reason", "unknown")
+                appendSystemMessage("APP_RESOLVE failed: $reason")
+            }
+
+            "fsm_route_plan_no_map" -> {
+                appendSystemMessage(
+                    "No navigation map found for this app, skipping routing and entering VISION_ACT directly."
+                )
+            }
+
+            "fsm_route_plan_done" -> {
+                val target = obj.optString("target_page", "")
+                val usedFallback = obj.optBoolean("used_fallback", false)
+                val base = if (target.isNotEmpty()) {
+                    "Route plan completed, target page: $target."
+                } else {
+                    "Route plan completed."
+                }
+                val msg = if (usedFallback) {
+                    "$base (fallback plan used)."
+                } else {
+                    base
+                }
+                appendSystemMessage(msg)
+            }
+
+            "fsm_route_plan_failed" -> {
+                val reason = obj.optString("reason", "unknown")
+                appendSystemMessage("Route planning failed: $reason")
+            }
+
+            "fsm_routing_done" -> {
+                val steps = obj.optInt("steps", -1)
+                val mode = obj.optString("mode", "")
+                val modeLabel = if (mode.isNotEmpty()) mode else "map"
+                val msg = if (steps >= 0) {
+                    "Routing finished: mode=$modeLabel, steps=$steps."
+                } else {
+                    "Routing finished: mode=$modeLabel."
+                }
+                appendSystemMessage(msg)
+            }
+
+            "fsm_routing_failed" -> {
+                val reason = obj.optString("reason", "unknown")
+                appendSystemMessage("Routing failed: $reason")
+            }
+
+            "fsm_cancel_requested" -> {
+                appendSystemMessage("Cancel requested, FSM will stop at the next safe point.")
+            }
+
+            "fsm_task_cancelled" -> {
+                appendSystemMessage("Task cancelled by user.")
+            }
+
+            "vision_screenshot_ready" -> {
+                appendSystemMessage("Screenshot captured, calling vision model for next action...")
+            }
+
+            "llm_prompt_vision_act" -> {
+                appendSystemMessage("Calling LLM + VLM for next step planning...")
+            }
+
+            "llm_response_vision_act" -> {
+                appendSystemMessage("Vision model responded with the next action.")
+            }
+
+            "vision_instruction_invalid" -> {
+                appendSystemMessage("Vision action output was invalid, stopping this task.")
+            }
+
+            "vision_action_loop_detected" -> {
+                appendSystemMessage("Repeated ineffective actions detected, stopping to avoid loop.")
+            }
+
+            "exec_action_error" -> {
+                val op = obj.optString("op", "")
+                appendSystemMessage("Execution error while running action ${if (op.isNotEmpty()) op else "UNKNOWN"}.")
+            }
+
+            "exec_tap_start" -> {
+                val x = obj.optInt("x", -1)
+                val y = obj.optInt("y", -1)
+                if (x >= 0 && y >= 0) {
+                    appendSystemMessage("Action: TAP at ($x, $y).")
+                } else {
+                    appendSystemMessage("Action: TAP.")
+                }
+            }
+
+            "exec_swipe_start" -> {
+                val x1 = obj.optInt("x1", -1)
+                val y1 = obj.optInt("y1", -1)
+                val x2 = obj.optInt("x2", -1)
+                val y2 = obj.optInt("y2", -1)
+                val dur = obj.optInt("duration", -1)
+                val desc = StringBuilder("Action: SWIPE")
+                if (x1 >= 0 && y1 >= 0 && x2 >= 0 && y2 >= 0) {
+                    desc.append(" from ($x1, $y1) to ($x2, $y2)")
+                }
+                if (dur >= 0) {
+                    desc.append(" in ${dur}ms")
+                }
+                desc.append(".")
+                appendSystemMessage(desc.toString())
+            }
+
+            "exec_input_start" -> {
+                val text = obj.optString("text", "")
+                if (text.isNotEmpty()) {
+                    appendSystemMessage("Action: INPUT text \"$text\".")
+                } else {
+                    appendSystemMessage("Action: INPUT text.")
+                }
+            }
+
+            "exec_wait_start" -> {
+                val ms = obj.optInt("ms", -1)
+                if (ms > 0) {
+                    appendSystemMessage("Action: WAIT for ${ms}ms.")
+                } else {
+                    appendSystemMessage("Action: WAIT.")
+                }
+            }
+
+            "exec_back_start" -> {
+                appendSystemMessage("Action: BACK key pressed.")
+            }
+        }
+    }
+
+    // ----- LLM config and test -----
+
     fun testLlmAndSyncConfig() {
         val baseUrl = llmBaseUrl.value.trim()
         val model = llmModel.value.trim()
         if (baseUrl.isEmpty() || model.isEmpty()) {
-            llmTestResult.value = "请先填写 LLM 的 API Base URL 和 Model"
+            llmTestResult.value = "Please fill LLM API Base URL and Model first."
             return
         }
 
         saveConfig()
 
         viewModelScope.launch {
-            llmTestResult.value = "测试中..."
+            llmTestResult.value = "Testing LLM..."
 
-            // 1) 写入端侧配置文件（shell 可读）
+            // 1) Write device-side config file (shell readable)
             val cfgJson = org.json.JSONObject()
                 .put("api_base_url", baseUrl)
                 .put("api_key", llmApiKey.value)
@@ -277,13 +630,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 shizukuManager.writeConfigFile(LLM_CONFIG_PATH, cfgBytes)
             }
             if (syncResult.isFailure) {
-                val msg = "写入端侧配置失败: ${syncResult.exceptionOrNull()?.message}"
+                val msg = "Failed to write device config: ${syncResult.exceptionOrNull()?.message}"
                 llmTestResult.value = msg
                 appendLog("[LLM] $msg")
                 return@launch
             }
 
-            // 2) 直接从 APK 侧调用云端 LLM，验证配置可用
+            // 2) Directly call cloud LLM from APK to validate the config
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val json = org.json.JSONObject()
@@ -294,7 +647,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             org.json.JSONArray().put(
                                 org.json.JSONObject()
                                     .put("role", "user")
-                                    .put("content", "请仅回复 ok")
+                                    .put("content", "Please reply with ok only.")
                             )
                         )
                         .toString()
@@ -314,13 +667,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         } else {
                             val ok = text.contains("ok", ignoreCase = true)
                             if (ok) {
-                                "LLM 调用成功: 收到包含 ok 的响应 (HTTP $code)"
+                                "LLM call succeeded: response contains ok (HTTP $code)"
                             } else {
-                                "LLM 调用成功 (HTTP $code)，但响应未明显包含 ok: ${text.take(120)}"
+                                "LLM call succeeded (HTTP $code), but response does not clearly contain ok: ${text.take(120)}"
                             }
                         }
                     }
-                }.getOrElse { e -> "LLM 调用失败: ${e.message}" }
+                }.getOrElse { e -> "LLM call failed: ${e.message}" }
             }
 
             llmTestResult.value = result
@@ -331,7 +684,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveConfig() {
         prefs.edit()
             .putString(KEY_LXB_PORT, lxbPort.value)
-            .putString(KEY_TCP_MOCK_PORT, tcpMockPort.value)
             .putString(KEY_SERVER_IP, serverIp.value)
             .putString(KEY_SERVER_PORT, serverPort.value)
             .putString(KEY_LLM_BASE_URL, llmBaseUrl.value)
@@ -349,9 +701,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _logLines.value = current
     }
 
+    private fun appendUserMessage(text: String) {
+        val msg = ChatMessage(
+            id = nextMsgId++,
+            role = ChatRole.USER,
+            text = text
+        )
+        val current = _chatMessages.value.toMutableList()
+        current.add(msg)
+        if (current.size > 100) {
+            current.subList(0, current.size - 100).clear()
+        }
+        _chatMessages.value = current
+    }
+
+    private fun appendSystemMessage(text: String) {
+        val msg = ChatMessage(
+            id = nextMsgId++,
+            role = ChatRole.SYSTEM,
+            text = text
+        )
+        val current = _chatMessages.value.toMutableList()
+        current.add(msg)
+        if (current.size > 100) {
+            current.subList(0, current.size - 100).clear()
+        }
+        _chatMessages.value = current
+    }
+
     override fun onCleared() {
         super.onCleared()
         shizukuManager.detach()
+        activeTraceJob?.cancel()
         httpClient.dispatcher.executorService.shutdown()
     }
 }

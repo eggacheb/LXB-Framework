@@ -52,4 +52,7 @@ public final class CommandIds {
     public static final byte CMD_CORTEX_TRACE_PULL = 0x74;      // pull trace lines (jsonl)
     public static final byte CMD_CORTEX_ROUTE_RUN = 0x75;       // run route-only FSM (sync)
     public static final byte CMD_CORTEX_FSM_RUN = 0x76;         // run full Cortex FSM (sync, WIP)
+    public static final byte CMD_CORTEX_TASK_STATUS = 0x77;     // query FSM task status by task_id
+    public static final byte CMD_CORTEX_FSM_CANCEL = 0x78;      // request cancellation of current FSM task
+    public static final byte CMD_CORTEX_TASK_LIST = 0x79;       // list recent Cortex FSM tasks
 }

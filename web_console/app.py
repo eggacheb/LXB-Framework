@@ -4066,15 +4066,12 @@ def cmd_cortex_fsm_run():
             map_path=map_path or None,
             start_page=start_page or None,
         )
-        ok = result.get('status') == 'success'
-        pkg = (result.get('package_name') or package_name or '').strip()
-        target_page = (result.get('target_page') or '').strip()
-        state = (result.get('state') or '').strip()
+        ok = bool(result.get('ok')) and result.get('status') == 'submitted'
+        task_id = (result.get('task_id') or '').strip()
         if ok:
-            msg = f'CORTEX_FSM_RUN 成功: package={pkg or "<auto>"}, target_page={target_page or "<unknown>"}, state={state or "FINISH"}'
+            msg = f'CORTEX_FSM_RUN 已提交: task_id={task_id or "<unknown>"}'
         else:
-            reason = (result.get('reason') or '').strip() or 'unknown'
-            msg = f'CORTEX_FSM_RUN 失败: {reason} @state={state or "UNKNOWN"}'
+            msg = f'CORTEX_FSM_RUN 提交失败: {result}'
         return jsonify({
             'success': ok,
             'message': msg,

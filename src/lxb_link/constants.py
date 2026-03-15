@@ -159,6 +159,9 @@ CMD_CORTEX_TAP_LOCATOR = 0x73      # Resolve locator then tap
 CMD_CORTEX_TRACE_PULL = 0x74       # Pull last N trace lines (JSONL)
 CMD_CORTEX_ROUTE_RUN = 0x75        # Route-only execution (sync, from_page->to_page)
 CMD_CORTEX_FSM_RUN = 0x76          # Full Cortex FSM execution on device (sync)
+CMD_CORTEX_TASK_STATUS = 0x77      # Query Cortex FSM task status by task_id
+CMD_CORTEX_FSM_CANCEL = 0x78       # Request cancellation of current Cortex FSM task
+CMD_CORTEX_TASK_LIST = 0x79        # List recent Cortex FSM tasks
 
 # =============================================================================
 
@@ -202,6 +205,9 @@ IMPLEMENTED_COMMANDS_V1 = {
     CMD_CORTEX_TRACE_PULL,
     CMD_CORTEX_ROUTE_RUN,
     CMD_CORTEX_FSM_RUN,
+    CMD_CORTEX_TASK_STATUS,
+    CMD_CORTEX_FSM_CANCEL,
+    CMD_CORTEX_TASK_LIST,
 }
 
 # =============================================================================
@@ -267,6 +273,9 @@ CHANNEL_MAP = {
     CMD_GET_SCREEN_SIZE: CH_CONTROL,
     CMD_CORTEX_ROUTE_RUN: CH_CONTROL,
     CMD_CORTEX_FSM_RUN: CH_CONTROL,
+    CMD_CORTEX_TASK_STATUS: CH_CONTROL,
+    CMD_CORTEX_FSM_CANCEL: CH_CONTROL,
+    CMD_CORTEX_TASK_LIST: CH_CONTROL,
 
     # Data Channel (large data transfer)
     CMD_DUMP_HIERARCHY: CH_DATA,

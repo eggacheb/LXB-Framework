@@ -41,6 +41,15 @@ public class CortexFsmEngine {
     }
 
     /**
+     * Simple cancellation checker used by the FSM run loop. The implementation
+     * is provided by CortexTaskManager so that a separate command can request
+     * cancellation of the currently running task.
+     */
+    public interface CancellationChecker {
+        boolean isCancelled();
+    }
+
+    /**
      * Execution context for a single Cortex automation task.
      * Mirrors the Python CortexContext dataclass in a minimal form.
      */
@@ -128,64 +137,93 @@ public class CortexFsmEngine {
             String userTask,
             String packageName,
             String mapPath,
-            String startPage
+            String startPage,
+            String traceMode,
+            Integer traceUdpPort,
+            String taskIdOverride,
+            CancellationChecker cancellationChecker
     ) {
-        Context ctx = new Context(UUID.randomUUID().toString());
+        String effectiveTaskId = (taskIdOverride != null && !taskIdOverride.isEmpty())
+                ? taskIdOverride
+                : java.util.UUID.randomUUID().toString();
+        Context ctx = new Context(effectiveTaskId);
         ctx.userTask = userTask != null ? userTask : "";
         ctx.selectedPackage = packageName != null ? packageName : "";
         ctx.mapPath = mapPath;
         ctx.startPage = startPage;
 
+        boolean enablePush = "push".equalsIgnoreCase(traceMode)
+                && traceUdpPort != null
+                && traceUdpPort.intValue() > 0;
+        if (enablePush) {
+            // Push to localhost; the Android front-end listens on this port.
+            trace.setPushTarget("127.0.0.1", traceUdpPort.intValue(), ctx.taskId);
+        }
+
         State state = State.INIT;
 
-        for (int i = 0; i < 30; i++) {
-            if (state == State.INIT) {
-                state = runInitState(ctx);
-                continue;
-            }
-            if (state == State.APP_RESOLVE) {
-                state = runAppResolveState(ctx);
-                continue;
-            }
-            if (state == State.ROUTE_PLAN) {
-                state = runRoutePlanState(ctx);
-                continue;
-            }
-            if (state == State.ROUTING) {
-                state = runRoutingState(ctx);
-                continue;
-            }
-            if (state == State.VISION_ACT) {
-                state = runVisionActState(ctx);
-                continue;
-            }
-            if (state == State.FINISH || state == State.FAIL) {
+        try {
+            for (int i = 0; i < 30; i++) {
+                if (cancellationChecker != null && cancellationChecker.isCancelled()) {
+                    ctx.error = "cancelled_by_user";
+                    Map<String, Object> cancelEv = new LinkedHashMap<>();
+                    cancelEv.put("task_id", ctx.taskId);
+                    trace.event("fsm_task_cancelled", cancelEv);
+                    state = State.FAIL;
+                    break;
+                }
+                if (state == State.INIT) {
+                    state = runInitState(ctx);
+                    continue;
+                }
+                if (state == State.APP_RESOLVE) {
+                    state = runAppResolveState(ctx);
+                    continue;
+                }
+                if (state == State.ROUTE_PLAN) {
+                    state = runRoutePlanState(ctx);
+                    continue;
+                }
+                if (state == State.ROUTING) {
+                    state = runRoutingState(ctx);
+                    continue;
+                }
+                if (state == State.VISION_ACT) {
+                    state = runVisionActState(ctx);
+                    continue;
+                }
+                if (state == State.FINISH || state == State.FAIL) {
+                    break;
+                }
+                // Safety: unknown state
+                ctx.error = "unknown_state:" + state.name();
+                state = State.FAIL;
                 break;
             }
-            // Safety: unknown state
-            ctx.error = "unknown_state:" + state.name();
-            state = State.FAIL;
-            break;
-        }
 
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("status", state == State.FINISH ? "success" : "failed");
-        out.put("task_id", ctx.taskId);
-        out.put("state", state.name());
-        out.put("package_name", ctx.selectedPackage);
-        out.put("target_page", ctx.targetPage != null ? ctx.targetPage : "");
-        out.put("route_trace", new ArrayList<>(ctx.routeTrace));
-        out.put("route_result", new LinkedHashMap<>(ctx.routeResult));
-        out.put("command_log", new ArrayList<>(ctx.commandLog));
-        out.put("llm_history", new ArrayList<>(ctx.llmHistory));
-        out.put("lessons", new ArrayList<>(ctx.lessons));
-        if (ctx.error != null && !ctx.error.isEmpty()) {
-            out.put("reason", ctx.error);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("status", state == State.FINISH ? "success" : "failed");
+            out.put("task_id", ctx.taskId);
+            out.put("state", state.name());
+            out.put("package_name", ctx.selectedPackage);
+            out.put("target_page", ctx.targetPage != null ? ctx.targetPage : "");
+            out.put("route_trace", new ArrayList<>(ctx.routeTrace));
+            out.put("route_result", new LinkedHashMap<>(ctx.routeResult));
+            out.put("command_log", new ArrayList<>(ctx.commandLog));
+            out.put("llm_history", new ArrayList<>(ctx.llmHistory));
+            out.put("lessons", new ArrayList<>(ctx.lessons));
+            if (ctx.error != null && !ctx.error.isEmpty()) {
+                out.put("reason", ctx.error);
+            }
+            if (!ctx.output.isEmpty()) {
+                out.put("output", new LinkedHashMap<>(ctx.output));
+            }
+            return out;
+        } finally {
+            if (enablePush) {
+                trace.clearPushTarget(ctx.taskId);
+            }
         }
-        if (!ctx.output.isEmpty()) {
-            out.put("output", new LinkedHashMap<>(ctx.output));
-        }
-        return out;
     }
 
     private State runInitState(Context ctx) {

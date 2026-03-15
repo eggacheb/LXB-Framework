@@ -20,10 +20,15 @@ import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 
 /**
- * Shizuku 管理器（API 13 UserService 版）
+ * Shizuku manager wrapping the UserService (ShizukuServiceImpl) running in shell.
  *
- * 通过 Shizuku.bindUserService() 在 shell 进程中运行 ShizukuServiceImpl，
- * 再通过 AIDL 调用来部署/启动/停止 lxb-core。
+ * Responsibilities:
+ * - Bind/unbind the Shizuku user service.
+ * - Start / stop lxb-core server via AIDL.
+ * - Poll lxb-core log file and forward lines to listener.
+ * - Keep a lightweight state machine for UI / notification (UNAVAILABLE / READY / RUNNING / ...).
+ *
+ * All user-visible text is ASCII-only to avoid encoding issues.
  */
 class ShizukuManager(private val context: Context) {
 
@@ -37,12 +42,12 @@ class ShizukuManager(private val context: Context) {
     }
 
     enum class State {
-        UNAVAILABLE,        // Shizuku binder 未收到
-        PERMISSION_DENIED,  // 权限未授予
-        READY,              // UserService 已绑定，可启动
-        STARTING,           // 部署+启动中
-        RUNNING,            // 服务进程存活
-        ERROR
+        UNAVAILABLE,        // Shizuku binder not ready
+        PERMISSION_DENIED,  // Shizuku permission denied
+        READY,              // UserService bound, can start server
+        STARTING,           // Deploying jar / starting server
+        RUNNING,            // lxb-core server process is running
+        ERROR               // Error state
     }
 
     interface Listener {
@@ -56,12 +61,14 @@ class ShizukuManager(private val context: Context) {
 
     private var listener: Listener? = null
     private var service: IShizukuService? = null
-    private var isBound = false
-    private var logBytesRead = 0L
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var isBound: Boolean = false
+    private var logBytesRead: Long = 0L
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var logPollJob: Job? = null
 
-    fun setListener(l: Listener) { listener = l }
+    fun setListener(l: Listener) {
+        listener = l
+    }
 
     private fun log(msg: String) {
         Log.i(TAG, msg)
@@ -73,7 +80,7 @@ class ShizukuManager(private val context: Context) {
         listener?.onStateChanged(state, msg)
     }
 
-    // ─── Shizuku 生命周期 ─────────────────────────────────────────────
+    // ----- Shizuku binder / user service lifecycle -----
 
     private val userServiceArgs = Shizuku.UserServiceArgs(
         ComponentName(context.packageName, ShizukuServiceImpl::class.java.name)
@@ -87,45 +94,61 @@ class ShizukuManager(private val context: Context) {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = IShizukuService.Stub.asInterface(binder)
             isBound = true
-            log("Shizuku UserService 已连接")
-            if (currentState != State.RUNNING && currentState != State.STARTING) {
-                setState(State.READY, "Shizuku 就绪，可以启动服务")
+            log("Shizuku UserService connected")
+
+            // When (re)connected, detect whether lxb-core is already running in background.
+            // This handles the case where the APK was killed but the server process kept running.
+            scope.launch {
+                val svc = service
+                if (svc != null) {
+                    val running = runCatching { svc.isRunning(SERVER_CLASS) }.getOrDefault(false)
+                    if (running) {
+                        log("Detected lxb-core already running in background")
+                        logBytesRead = 0L
+                        setState(State.RUNNING, "Server is already running in background")
+                        startLogPolling(svc)
+                        return@launch
+                    }
+                }
+                if (currentState != State.RUNNING && currentState != State.STARTING) {
+                    setState(State.READY, "Shizuku ready, you can start the server")
+                }
             }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             service = null
             isBound = false
-            log("Shizuku UserService 已断开")
+            log("Shizuku UserService disconnected")
             if (currentState == State.RUNNING) {
-                setState(State.ERROR, "UserService 意外断开，请重新启动")
+                setState(State.ERROR, "UserService disconnected unexpectedly, please retry")
             }
         }
     }
 
     private val onBinderReceived = Shizuku.OnBinderReceivedListener {
-        log("Shizuku binder 已接收")
+        log("Shizuku binder received")
         refreshState()
     }
 
     private val onBinderDead = Shizuku.OnBinderDeadListener {
-        log("Shizuku binder 已断开")
+        log("Shizuku binder dead")
         service = null
         isBound = false
         logPollJob?.cancel()
-        setState(State.UNAVAILABLE, "Shizuku 已停止")
+        setState(State.UNAVAILABLE, "Shizuku binder is not ready")
     }
 
     private val onPermissionResult = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
         if (grantResult == PackageManager.PERMISSION_GRANTED) {
-            log("Shizuku 权限已授予")
+            log("Shizuku permission granted")
             bindServiceIfNeeded()
         } else {
-            setState(State.PERMISSION_DENIED, "Shizuku 权限被拒绝")
+            setState(State.PERMISSION_DENIED, "Shizuku permission denied")
         }
     }
 
-    /** 在 ViewModel.init 中调用 */
+    /** Should be called from ViewModel.init or Service.onCreate. */
     fun attach() {
         Shizuku.addBinderReceivedListenerSticky(onBinderReceived)
         Shizuku.addBinderDeadListener(onBinderDead)
@@ -133,7 +156,7 @@ class ShizukuManager(private val context: Context) {
         refreshState()
     }
 
-    /** 在 ViewModel.onCleared 中调用 */
+    /** Should be called from ViewModel.onCleared or Service.onDestroy. */
     fun detach() {
         logPollJob?.cancel()
         scope.cancel()
@@ -149,11 +172,19 @@ class ShizukuManager(private val context: Context) {
     fun refreshState() {
         when {
             !Shizuku.pingBinder() -> {
-                setState(State.UNAVAILABLE, "Shizuku 未运行，请先在 Shizuku App 中启动服务")
+                setState(
+                    State.UNAVAILABLE,
+                    "Shizuku is not running, please start the Shizuku service first"
+                )
             }
+
             Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> {
-                setState(State.PERMISSION_DENIED, "请点击「授权」允许本 App 使用 Shizuku")
+                setState(
+                    State.PERMISSION_DENIED,
+                    "Please grant Shizuku permission to this app"
+                )
             }
+
             else -> {
                 bindServiceIfNeeded()
             }
@@ -167,20 +198,19 @@ class ShizukuManager(private val context: Context) {
     }
 
     /**
-     * Write a small config file to a shell-accessible path using the Shizuku
-     * user service (reuses deployJar under the hood).
+     * Write a config file to a shell-accessible path via the user service (reuses deployJar).
      */
     suspend fun writeConfigFile(destPath: String, content: ByteArray): Result<Unit> =
         withContext(Dispatchers.IO) {
             val svc = service ?: return@withContext Result.failure(
-                Exception("Shizuku UserService 未连接，无法写入配置")
+                Exception("Shizuku UserService is not connected, cannot write config file")
             )
             return@withContext try {
                 val ok = svc.deployJar(content, destPath)
                 if (ok) {
                     Result.success(Unit)
                 } else {
-                    Result.failure(Exception("deployJar 返回 false"))
+                    Result.failure(Exception("deployJar returned false"))
                 }
             } catch (e: Exception) {
                 Result.failure(e)
@@ -189,52 +219,56 @@ class ShizukuManager(private val context: Context) {
 
     private fun bindServiceIfNeeded() {
         if (!isBound) {
-            log("绑定 Shizuku UserService...")
+            log("Binding Shizuku UserService...")
             Shizuku.bindUserService(userServiceArgs, serviceConnection)
         } else if (currentState != State.RUNNING && currentState != State.STARTING) {
-            setState(State.READY, "Shizuku 就绪")
+            setState(State.READY, "Shizuku ready")
         }
     }
 
-    // ─── 服务管理 ────────────────────────────────────────────────────
+    // ----- lxb-core server management -----
 
     suspend fun startServer(port: Int): Result<Unit> = withContext(Dispatchers.IO) {
         val svc = service ?: return@withContext Result.failure(
-            Exception("Shizuku UserService 未连接，请稍候重试")
+            Exception("Shizuku UserService is not connected, please retry")
         )
         try {
-            setState(State.STARTING, "正在读取 JAR...")
+            setState(State.STARTING, "Reading JAR from assets...")
             val jarBytes = readAssetBytes(ASSET_JAR)
-            log("JAR 已从 assets 读取 (${jarBytes.size} bytes)")
+            log("Read JAR from assets (${jarBytes.size} bytes)")
 
-            setState(State.STARTING, "部署 JAR 到 $TMP_JAR...")
+            setState(State.STARTING, "Writing JAR to $TMP_JAR...")
             val deployed = svc.deployJar(jarBytes, TMP_JAR)
             if (!deployed) {
-                val msg = "JAR 写入 $TMP_JAR 失败"
+                val msg = "Failed to write JAR to $TMP_JAR"
                 setState(State.ERROR, msg)
                 return@withContext Result.failure(Exception(msg))
             }
-            log("JAR 已写入 $TMP_JAR")
+            log("JAR written to $TMP_JAR")
 
-            setState(State.STARTING, "启动 lxb-core (UDP :$port)...")
+            setState(State.STARTING, "Starting lxb-core (UDP :$port)...")
             val result = svc.startServer(TMP_JAR, SERVER_CLASS, port)
 
             if (result.startsWith("OK")) {
                 logBytesRead = 0L
-                setState(State.RUNNING, "服务运行中 (UDP :$port)")
-                result.removePrefix("OK\n").lines().filter { it.isNotEmpty() }.forEach { log(it) }
+                setState(State.RUNNING, "Server running (UDP :$port)")
+                result.removePrefix("OK\n")
+                    .lines()
+                    .filter { it.isNotEmpty() }
+                    .forEach { log(it) }
                 startLogPolling(svc)
                 Result.success(Unit)
             } else {
                 val body = result.removePrefix("ERROR\n")
-                // StatusCard 只显示第一行摘要，完整日志逐行写入 LogPanel
-                val summary = body.lines().firstOrNull { it.isNotEmpty() } ?: "启动失败"
+                val summary = body.lines().firstOrNull { it.isNotEmpty() } ?: "Failed to start"
                 setState(State.ERROR, summary)
-                body.lines().filter { it.isNotEmpty() }.forEach { log(it) }
+                body.lines()
+                    .filter { it.isNotEmpty() }
+                    .forEach { log(it) }
                 Result.failure(Exception(summary))
             }
         } catch (e: Exception) {
-            val msg = "启动失败: ${e.message}"
+            val msg = "Failed to start: ${e.message}"
             log(msg)
             setState(State.ERROR, msg)
             Result.failure(e)
@@ -245,10 +279,10 @@ class ShizukuManager(private val context: Context) {
         logPollJob?.cancel()
         try {
             service?.stopServer(SERVER_CLASS)
-            setState(State.READY, "服务已停止")
+            setState(State.READY, "Server stopped")
             Result.success(Unit)
         } catch (e: Exception) {
-            val msg = "停止失败: ${e.message}"
+            val msg = "Failed to stop: ${e.message}"
             log(msg)
             Result.failure(e)
         }
@@ -258,7 +292,7 @@ class ShizukuManager(private val context: Context) {
         runCatching { service?.isRunning(SERVER_CLASS) ?: false }.getOrDefault(false)
     }
 
-    // ─── 日志轮询 ────────────────────────────────────────────────────
+    // ----- log polling -----
 
     private fun startLogPolling(svc: IShizukuService) {
         logPollJob?.cancel()
@@ -268,10 +302,12 @@ class ShizukuManager(private val context: Context) {
                 try {
                     val chunk = svc.readLogPart(logBytesRead, 4096)
                     if (chunk.isNotEmpty()) {
-                        logBytesRead += chunk.toByteArray(Charsets.UTF_8).size
-                        chunk.lines().filter { it.isNotEmpty() }.forEach { line ->
-                            listener?.onLogLine(line)
-                        }
+                        // Note: we approximate consumed bytes using UTF-8; server uses same.
+                        val bytes = chunk.toByteArray(Charsets.UTF_8)
+                        logBytesRead += bytes.size
+                        chunk.lines()
+                            .filter { it.isNotEmpty() }
+                            .forEach { line -> listener?.onLogLine(line) }
                     }
                 } catch (_: Exception) {
                     break
@@ -280,13 +316,16 @@ class ShizukuManager(private val context: Context) {
         }
     }
 
-    // ─── 私有辅助 ────────────────────────────────────────────────────
+    // ----- helpers -----
 
     private fun readAssetBytes(name: String): ByteArray {
         return try {
             context.assets.open(name).use { it.readBytes() }
         } catch (e: Exception) {
-            throw Exception("无法从 assets 读取 $name，请先运行 ./gradlew :lxb-core:buildDex: ${e.message}")
+            throw Exception(
+                "Cannot read $name from assets; please run ./gradlew :lxb-core:buildDex first: ${e.message}"
+            )
         }
     }
 }
+

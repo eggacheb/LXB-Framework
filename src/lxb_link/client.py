@@ -61,6 +61,9 @@ from .constants import (
     CMD_CORTEX_TRACE_PULL,
     CMD_CORTEX_ROUTE_RUN,
     CMD_CORTEX_FSM_RUN,
+    CMD_CORTEX_TASK_STATUS,
+    CMD_CORTEX_FSM_CANCEL,
+    CMD_CORTEX_TASK_LIST,
     # Match types for FIND_NODE
     MATCH_EXACT_TEXT,
     MATCH_CONTAINS_TEXT,
@@ -1268,7 +1271,7 @@ class LXBLinkClient:
         start_page: str | None = None,
     ) -> dict:
         """
-        Run full Cortex FSM on device (INIT -> APP_RESOLVE -> ROUTE_PLAN -> ROUTING -> VISION_ACT).
+        Submit full Cortex FSM task on device (INIT -> APP_RESOLVE -> ROUTE_PLAN -> ROUTING -> VISION_ACT).
 
         Args:
             user_task: High-level user task description (Chinese or English).
@@ -1277,13 +1280,12 @@ class LXBLinkClient:
             start_page: Optional start page id for routing. Leave None to infer home from map.
 
         Returns:
-            JSON dict with FSM result. Keys include:
-                - status: "success" or "failed"
-                - state: final FSM state name
-                - package_name: selected package
-                - target_page: planned target page (if any)
-                - route_result: route execution summary
-                - command_log / llm_history / lessons: planner internals
+            JSON dict with submission result. Keys include:
+                - ok: true/false
+                - status: "submitted" when accepted
+                - task_id: generated task id
+
+            Use CMD_CORTEX_TASK_STATUS and/or trace stream to observe progress and final result.
         """
         self._ensure_connected()
         import json
@@ -1299,8 +1301,36 @@ class LXBLinkClient:
             payload_dict["start_page"] = start_page
 
         payload = json.dumps(payload_dict, ensure_ascii=False).encode("utf-8")
-        # FSM may take longer than a single route_run (INIT + APP_RESOLVE + ROUTE_* states).
-        resp = self._cmd(CMD_CORTEX_FSM_RUN, payload, timeout_factor=20.0)
+        # Submission returns quickly with a task_id.
+        resp = self._cmd(CMD_CORTEX_FSM_RUN, payload, timeout_factor=5.0)
+        return json.loads(resp.decode("utf-8", errors="replace"))
+
+    def cortex_task_status(self, task_id: str) -> dict:
+        """
+        Query status of a Cortex FSM task by task_id.
+        """
+        self._ensure_connected()
+        import json
+
+        payload = json.dumps({"task_id": task_id}, ensure_ascii=False).encode("utf-8")
+        resp = self._cmd(CMD_CORTEX_TASK_STATUS, payload, timeout_factor=3.0)
+        return json.loads(resp.decode("utf-8", errors="replace"))
+
+    def cortex_task_list(self, limit: int = 50) -> dict:
+        """
+        List recent Cortex FSM tasks.
+
+        Returns:
+            {
+              "ok": true,
+              "tasks": [ ... ]
+            }
+        """
+        self._ensure_connected()
+        import json
+
+        payload = json.dumps({"limit": int(limit)}, ensure_ascii=False).encode("utf-8")
+        resp = self._cmd(CMD_CORTEX_TASK_LIST, payload, timeout_factor=3.0)
         return json.loads(resp.decode("utf-8", errors="replace"))
 
     def _parse_dump_actions_response(self, data: bytes) -> dict:
