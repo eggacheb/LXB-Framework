@@ -43,6 +43,9 @@ public class LlmClient {
                     ? conn.getInputStream()
                     : conn.getErrorStream();
             String resp = readAll(is);
+            if (code >= 200 && code < 300 && (resp == null || resp.trim().isEmpty())) {
+                throw new IllegalStateException("LLM HTTP " + code + ": empty body");
+            }
 
             if (code < 200 || code >= 300) {
                 String snippet = resp;
@@ -57,6 +60,10 @@ public class LlmClient {
                 if (parsed instanceof Map) {
                     @SuppressWarnings("unchecked")
                     Map<String, Object> root = (Map<String, Object>) parsed;
+                    String extracted = extractAssistantText(root);
+                    if (extracted != null && !extracted.isEmpty()) {
+                        return extracted;
+                    }
                     Object choicesObj = root.get("choices");
                     if (choicesObj instanceof List) {
                         @SuppressWarnings("unchecked")
@@ -71,13 +78,19 @@ public class LlmClient {
                                     @SuppressWarnings("unchecked")
                                     Map<String, Object> msg = (Map<String, Object>) messageObj;
                                     Object contentObj = msg.get("content");
-                                    if (contentObj != null) {
-                                        return String.valueOf(contentObj).trim();
+                                    String contentText = extractContentText(contentObj);
+                                    if (contentText != null && !contentText.isEmpty()) {
+                                        return contentText;
+                                    }
+                                    String reasoningText = extractContentText(msg.get("reasoning_content"));
+                                    if (reasoningText != null && !reasoningText.isEmpty()) {
+                                        return reasoningText;
                                     }
                                 }
                                 Object textObj = choice.get("text");
-                                if (textObj != null) {
-                                    return String.valueOf(textObj).trim();
+                                String choiceText = extractContentText(textObj);
+                                if (choiceText != null && !choiceText.isEmpty()) {
+                                    return choiceText;
                                 }
                             }
                         }
@@ -92,6 +105,74 @@ public class LlmClient {
                 conn.disconnect();
             }
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String extractAssistantText(Map<String, Object> root) {
+        if (root == null || root.isEmpty()) {
+            return "";
+        }
+        // Common OpenAI-compatible chat field.
+        Object choicesObj = root.get("choices");
+        if (choicesObj instanceof List) {
+            List<?> choices = (List<?>) choicesObj;
+            if (!choices.isEmpty() && choices.get(0) instanceof Map) {
+                Map<String, Object> c0 = (Map<String, Object>) choices.get(0);
+                Object messageObj = c0.get("message");
+                if (messageObj instanceof Map) {
+                    Map<String, Object> msg = (Map<String, Object>) messageObj;
+                    String s = extractContentText(msg.get("content"));
+                    if (!s.isEmpty()) return s;
+                    s = extractContentText(msg.get("reasoning_content"));
+                    if (!s.isEmpty()) return s;
+                }
+                String s = extractContentText(c0.get("text"));
+                if (!s.isEmpty()) return s;
+            }
+        }
+        // Some providers expose direct output_text field.
+        String outText = extractContentText(root.get("output_text"));
+        if (!outText.isEmpty()) {
+            return outText;
+        }
+        return "";
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String extractContentText(Object contentObj) {
+        if (contentObj == null) {
+            return "";
+        }
+        if (contentObj instanceof String) {
+            return ((String) contentObj).trim();
+        }
+        if (contentObj instanceof Number || contentObj instanceof Boolean) {
+            return String.valueOf(contentObj).trim();
+        }
+        if (contentObj instanceof List) {
+            StringBuilder sb = new StringBuilder();
+            for (Object item : (List<Object>) contentObj) {
+                String s = extractContentText(item);
+                if (!s.isEmpty()) {
+                    if (sb.length() > 0) sb.append("\n");
+                    sb.append(s);
+                }
+            }
+            return sb.toString().trim();
+        }
+        if (contentObj instanceof Map) {
+            Map<String, Object> m = (Map<String, Object>) contentObj;
+            // Common multimodal content item shapes.
+            String s = extractContentText(m.get("text"));
+            if (!s.isEmpty()) return s;
+            s = extractContentText(m.get("content"));
+            if (!s.isEmpty()) return s;
+            s = extractContentText(m.get("value"));
+            if (!s.isEmpty()) return s;
+            // As a last resort keep a compact string form.
+            return String.valueOf(m).trim();
+        }
+        return String.valueOf(contentObj).trim();
     }
 
     public String chatOnce(LlmConfig config, String userMessage) throws Exception {
@@ -173,7 +254,7 @@ public class LlmClient {
         messages.add(user);
 
         root.put("messages", messages);
-        root.put("max_tokens", 4096);
+        root.put("max_tokens", 8192);
         return Json.stringify(root);
     }
 

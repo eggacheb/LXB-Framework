@@ -32,6 +32,7 @@ public class CortexFsmEngine {
 
     public enum State {
         INIT,
+        TASK_DECOMPOSE,
         APP_RESOLVE,
         ROUTE_PLAN,
         ROUTING,
@@ -56,6 +57,7 @@ public class CortexFsmEngine {
     public static class Context {
         public final String taskId;
         public String userTask = "";
+        public String rootUserTask = "";
         public String mapPath = null;
         public String startPage = null;
 
@@ -85,6 +87,21 @@ public class CortexFsmEngine {
         public final List<Map<String, Object>> appCandidates = new ArrayList<>();
         public final List<Map<String, Object>> pageCandidates = new ArrayList<>();
         public final Map<String, Object> coordProbe = new LinkedHashMap<>();
+
+        // Task decomposition (v2) fields
+        public final List<SubTask> subTasks = new ArrayList<>();
+        public String taskType = "";
+        public final Map<String, Object> blackboard = new LinkedHashMap<>();
+
+        // Current sub_task runtime context
+        public SubTask currentSubTask = null;
+        public int currentSubTaskIndex = -1;
+
+        // External semantic history (maintained by host, not by model memory).
+        // Each row contains: instruction, expected, actual, judgement.
+        public final List<Map<String, Object>> visionHistory = new ArrayList<>();
+        public String pendingHistoryInstruction = "";
+        public String pendingHistoryExpected = "";
 
         public Context(String taskId) {
             this.taskId = taskId;
@@ -124,14 +141,41 @@ public class CortexFsmEngine {
     }
 
     /**
+     * Sub-task contract for TASK_DECOMPOSE (v2).
+     */
+    public static class SubTask {
+        public String id = "";
+        public String description = "";
+        public String mode = "";          // "single" | "loop"
+        public String appHint = "";
+        public final List<String> inputs = new ArrayList<>();
+        public final List<String> outputs = new ArrayList<>();
+        public String successCriteria = "";
+        public LoopMetadata loopMetadata = null;
+    }
+
+    /**
+     * Loop-specific metadata for loop sub-tasks.
+     */
+    public static class LoopMetadata {
+        public String loopUnit = "";
+        public String loopTargetCondition = "";
+        public String loopTerminationCriteria = "";
+        public int maxIterations = 0;
+    }
+
+    /**
      * Run a Cortex FSM task.
      *
-     * For now this only wires state transitions; internal behaviors are stubs:
-     * - INIT       -> APP_RESOLVE
-     * - APP_RESOLVE: if package_name provided -> ROUTE_PLAN else FAIL
-     * - ROUTE_PLAN : if target_page already set -> ROUTING else FAIL (placeholder)
-     * - ROUTING    -> VISION_ACT (no real routing yet)
-     * - VISION_ACT -> FINISH (no real vision actions yet)
+     * v2 structure:
+     * - INIT: device/app discovery, coord probe.
+     * - TASK_DECOMPOSE: call LLM to produce sub_tasks contracts (optional, best-effort).
+     * - For each sub_task (currently using existing APP_RESOLVE/ROUTE_PLAN/ROUTING/VISION_ACT):
+     *   - APP_RESOLVE
+     *   - ROUTE_PLAN
+     *   - ROUTING
+     *   - VISION_ACT
+     * - Overall FINISH/FAIL is aggregated over all sub_tasks.
      */
     public Map<String, Object> run(
             String userTask,
@@ -145,12 +189,15 @@ public class CortexFsmEngine {
     ) {
         String effectiveTaskId = (taskIdOverride != null && !taskIdOverride.isEmpty())
                 ? taskIdOverride
-                : java.util.UUID.randomUUID().toString();
+                : UUID.randomUUID().toString();
         Context ctx = new Context(effectiveTaskId);
         ctx.userTask = userTask != null ? userTask : "";
-        ctx.selectedPackage = packageName != null ? packageName : "";
+        ctx.rootUserTask = ctx.userTask;
         ctx.mapPath = mapPath;
         ctx.startPage = startPage;
+
+        String initialPackageName = packageName != null ? packageName : "";
+        ctx.selectedPackage = initialPackageName;
 
         boolean enablePush = "push".equalsIgnoreCase(traceMode)
                 && traceUdpPort != null
@@ -160,9 +207,9 @@ public class CortexFsmEngine {
             trace.setPushTarget("127.0.0.1", traceUdpPort.intValue(), ctx.taskId);
         }
 
-        State state = State.INIT;
-
         try {
+            // 1) INIT + TASK_DECOMPOSE (single pass)
+            State state = State.INIT;
             for (int i = 0; i < 30; i++) {
                 if (cancellationChecker != null && cancellationChecker.isCancelled()) {
                     ctx.error = "cancelled_by_user";
@@ -176,35 +223,138 @@ public class CortexFsmEngine {
                     state = runInitState(ctx);
                     continue;
                 }
-                if (state == State.APP_RESOLVE) {
-                    state = runAppResolveState(ctx);
-                    continue;
+                if (state == State.TASK_DECOMPOSE) {
+                    state = runTaskDecomposeState(ctx);
+                    break; // after decomposition, move on to per-sub_task execution
                 }
-                if (state == State.ROUTE_PLAN) {
-                    state = runRoutePlanState(ctx);
-                    continue;
-                }
-                if (state == State.ROUTING) {
-                    state = runRoutingState(ctx);
-                    continue;
-                }
-                if (state == State.VISION_ACT) {
-                    state = runVisionActState(ctx);
-                    continue;
-                }
-                if (state == State.FINISH || state == State.FAIL) {
-                    break;
-                }
-                // Safety: unknown state
-                ctx.error = "unknown_state:" + state.name();
-                state = State.FAIL;
+                // Any other state here is unexpected; bail out.
                 break;
             }
 
+            // 2) Determine effective sub_tasks: if decomposition failed/empty, fallback to a single synthetic sub_task.
+            List<SubTask> effectiveSubTasks = new ArrayList<>();
+            if (ctx.subTasks.isEmpty()) {
+                SubTask st = new SubTask();
+                st.id = "default";
+                st.description = ctx.userTask != null ? ctx.userTask : "";
+                st.mode = "single";
+                st.appHint = "";
+                effectiveSubTasks.add(st);
+            } else {
+                effectiveSubTasks.addAll(ctx.subTasks);
+            }
+
+            boolean overallSuccess = true;
+            State lastState = State.FINISH;
+
+            // 3) Execute each sub_task using the existing APP_RESOLVE/ROUTE_PLAN/ROUTING/VISION_ACT pipeline.
+            for (int idx = 0; idx < effectiveSubTasks.size(); idx++) {
+                SubTask st = effectiveSubTasks.get(idx);
+
+                // For now, loop sub_tasks are still executed with the same single-shot pipeline.
+                // Later we will add dedicated loop semantics in VISION_ACT.
+
+                // Reset per-sub_task fields.
+                ctx.targetPage = "";
+                ctx.routeResult.clear();
+                ctx.visionTurns = 0;
+                ctx.lastCommand = "";
+                ctx.sameCommandStreak = 0;
+                ctx.sameActivityStreak = 0;
+                ctx.currentSubTask = st;
+                ctx.currentSubTaskIndex = idx;
+                ctx.visionHistory.clear();
+                ctx.pendingHistoryInstruction = "";
+                ctx.pendingHistoryExpected = "";
+
+                // Select package: caller-provided package has highest priority, then sub_task appHint.
+                if (!initialPackageName.isEmpty()) {
+                    ctx.selectedPackage = initialPackageName;
+                } else {
+                    String hint = st.appHint != null ? st.appHint.trim() : "";
+                    ctx.selectedPackage = hint;
+                }
+
+                // Use sub_task description as current userTask for prompts.
+                String globalTask = ctx.userTask != null ? ctx.userTask : "";
+                String subDesc = (st.description != null && !st.description.isEmpty()) ? st.description : globalTask;
+                ctx.userTask = subDesc;
+
+                Map<String, Object> subBegin = new LinkedHashMap<>();
+                subBegin.put("task_id", ctx.taskId);
+                subBegin.put("index", idx);
+                subBegin.put("sub_task_id", st.id);
+                subBegin.put("mode", st.mode);
+                subBegin.put("app_hint", st.appHint);
+                trace.event("fsm_sub_task_begin", subBegin);
+
+                state = State.APP_RESOLVE;
+                for (int step = 0; step < 30; step++) {
+                    if (cancellationChecker != null && cancellationChecker.isCancelled()) {
+                        ctx.error = "cancelled_by_user";
+                        Map<String, Object> cancelEv = new LinkedHashMap<>();
+                        cancelEv.put("task_id", ctx.taskId);
+                        trace.event("fsm_task_cancelled", cancelEv);
+                        state = State.FAIL;
+                        break;
+                    }
+                    if (state == State.APP_RESOLVE) {
+                        state = runAppResolveState(ctx);
+                        continue;
+                    }
+                    if (state == State.ROUTE_PLAN) {
+                        state = runRoutePlanState(ctx);
+                        continue;
+                    }
+                    if (state == State.ROUTING) {
+                        state = runRoutingState(ctx);
+                        continue;
+                    }
+                    if (state == State.VISION_ACT) {
+                        state = runVisionActState(ctx);
+                        continue;
+                    }
+                    if (state == State.FINISH || state == State.FAIL) {
+                        break;
+                    }
+                    // Safety: unknown state inside sub_task.
+                    ctx.error = "unknown_state:" + state.name();
+                    state = State.FAIL;
+                    break;
+                }
+
+                lastState = state;
+
+                Map<String, Object> subEnd = new LinkedHashMap<>();
+                subEnd.put("task_id", ctx.taskId);
+                subEnd.put("index", idx);
+                subEnd.put("sub_task_id", st.id);
+                subEnd.put("mode", st.mode);
+                subEnd.put("status", state == State.FINISH ? "success" : "failed");
+                trace.event("fsm_sub_task_end", subEnd);
+
+                // After a successful sub_task, best-effort reset: go HOME and stop the app.
+                if (state == State.FINISH) {
+                    safeResetToHomeAndStopApp(ctx);
+                }
+
+                // Restore global task text for logging / next sub_task.
+                ctx.userTask = globalTask;
+
+                if (state != State.FINISH) {
+                    overallSuccess = false;
+                    break;
+                }
+            }
+
+            State finalState = overallSuccess ? State.FINISH : State.FAIL;
+            ctx.currentSubTask = null;
+            ctx.currentSubTaskIndex = -1;
+
             Map<String, Object> out = new LinkedHashMap<>();
-            out.put("status", state == State.FINISH ? "success" : "failed");
+            out.put("status", finalState == State.FINISH ? "success" : "failed");
             out.put("task_id", ctx.taskId);
-            out.put("state", state.name());
+            out.put("state", finalState.name());
             out.put("package_name", ctx.selectedPackage);
             out.put("target_page", ctx.targetPage != null ? ctx.targetPage : "");
             out.put("route_trace", new ArrayList<>(ctx.routeTrace));
@@ -330,7 +480,9 @@ public class CortexFsmEngine {
         readyEv.put("coord_probe", ctx.coordProbe.isEmpty() ? null : new LinkedHashMap<>(ctx.coordProbe));
         trace.event("fsm_init_ready", readyEv);
 
-        return State.APP_RESOLVE;
+        // Next: task decomposition (v2). Even if decomposition fails, the FSM will
+        // fall back to the old single-task pipeline.
+        return State.TASK_DECOMPOSE;
     }
 
     /**
@@ -496,6 +648,277 @@ public class CortexFsmEngine {
         return o == null ? "" : String.valueOf(o).trim();
     }
 
+    @SuppressWarnings("unchecked")
+    private void storeSubTaskSummary(Context ctx, String summary) {
+        String s = summary != null ? summary.trim() : "";
+        if (s.isEmpty()) {
+            return;
+        }
+        String key = "sub_task_" + ctx.currentSubTaskIndex;
+        if (ctx.currentSubTask != null && ctx.currentSubTask.id != null && !ctx.currentSubTask.id.trim().isEmpty()) {
+            key = ctx.currentSubTask.id.trim();
+        }
+
+        ctx.blackboard.put(key, s);
+
+        Object obj = ctx.output.get("sub_task_summaries");
+        Map<String, Object> summaries;
+        if (obj instanceof Map) {
+            summaries = (Map<String, Object>) obj;
+        } else {
+            summaries = new LinkedHashMap<>();
+            ctx.output.put("sub_task_summaries", summaries);
+        }
+        summaries.put(key, s);
+
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("task_id", ctx.taskId);
+        ev.put("sub_task_key", key);
+        ev.put("summary", s);
+        trace.event("fsm_sub_task_summary", ev);
+    }
+
+    /**
+     * Best-effort reset between sub_tasks: go HOME and stop the current app.
+     * This avoids repeated LAUNCH_APP calls on an already-running task stack,
+     * which can cause rendering or state issues in some apps.
+     */
+    private void safeResetToHomeAndStopApp(Context ctx) {
+        // 1) Go HOME via KEY_EVENT (keycode=3, CLICK).
+        try {
+            ByteBuffer buf = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN);
+            buf.put((byte) 3);   // KEYCODE_HOME
+            buf.put((byte) 2);   // CLICK
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx.taskId);
+            trace.event("fsm_sub_task_go_home", ev);
+            execution.handleKeyEvent(buf.array());
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx.taskId);
+            ev.put("err", String.valueOf(e));
+            trace.event("fsm_sub_task_go_home_error", ev);
+        }
+
+        // 2) Stop the current app process if we know its package.
+        String pkg = ctx.selectedPackage != null ? ctx.selectedPackage.trim() : "";
+        if (pkg.isEmpty()) {
+            return;
+        }
+        try {
+            byte[] pkgBytes = pkg.getBytes(StandardCharsets.UTF_8);
+            ByteBuffer buf = ByteBuffer.allocate(2 + pkgBytes.length).order(ByteOrder.BIG_ENDIAN);
+            buf.putShort((short) pkgBytes.length);
+            buf.put(pkgBytes);
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx.taskId);
+            ev.put("package", pkg);
+            trace.event("fsm_sub_task_stop_app", ev);
+            execution.handleStopApp(buf.array());
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx.taskId);
+            ev.put("package", pkg);
+            ev.put("err", String.valueOf(e));
+            trace.event("fsm_sub_task_stop_app_error", ev);
+        }
+    }
+
+    /**
+     * TASK_DECOMPOSE (v2): call LLM to decompose the high-level task into sub_tasks.
+     * In step 1 we only log and store the result; execution behavior is unchanged.
+     */
+    private State runTaskDecomposeState(Context ctx) {
+        Map<String, Object> enterEv = new LinkedHashMap<>();
+        enterEv.put("task_id", ctx.taskId);
+        enterEv.put("state", State.TASK_DECOMPOSE.name());
+        trace.event("fsm_state_enter", enterEv);
+
+        String prompt = buildTaskDecomposePrompt(ctx);
+        Map<String, Object> promptEv = new LinkedHashMap<>();
+        promptEv.put("task_id", ctx.taskId);
+        promptEv.put("state", State.TASK_DECOMPOSE.name());
+        promptEv.put("prompt", prompt);
+        trace.event("llm_prompt_task_decompose", promptEv);
+
+        try {
+            LlmConfig cfg = LlmConfig.loadDefault();
+            String raw = llmClient.chatOnce(cfg, buildTaskDecomposeSystemPrompt(), prompt);
+
+            Map<String, Object> respEv = new LinkedHashMap<>();
+            respEv.put("task_id", ctx.taskId);
+            respEv.put("state", State.TASK_DECOMPOSE.name());
+            String snippet = raw != null && raw.length() > 800 ? raw.substring(0, 800) + "..." : raw;
+            respEv.put("response", snippet != null ? snippet : "");
+            trace.event("llm_response_task_decompose", respEv);
+
+            Map<String, Object> obj = extractJsonObjectFromText(raw);
+            if (!obj.isEmpty()) {
+                List<SubTask> subs = parseSubTasksFromObject(obj);
+                if (!subs.isEmpty()) {
+                    ctx.subTasks.clear();
+                    ctx.subTasks.addAll(subs);
+                }
+                ctx.taskType = stringOrEmpty(obj.get("task_type"));
+
+                Map<String, Object> doneEv = new LinkedHashMap<>();
+                doneEv.put("task_id", ctx.taskId);
+                doneEv.put("sub_task_count", ctx.subTasks.size());
+                doneEv.put("task_type", ctx.taskType);
+                trace.event("fsm_task_decompose_done", doneEv);
+            } else {
+                Map<String, Object> failEv = new LinkedHashMap<>();
+                failEv.put("task_id", ctx.taskId);
+                failEv.put("reason", "empty_or_invalid_json");
+                trace.event("fsm_task_decompose_parse_failed", failEv);
+            }
+        } catch (Exception e) {
+            Map<String, Object> errEv = new LinkedHashMap<>();
+            errEv.put("task_id", ctx.taskId);
+            errEv.put("state", State.TASK_DECOMPOSE.name());
+            errEv.put("err", String.valueOf(e));
+            trace.event("llm_error_task_decompose", errEv);
+        }
+
+        // For now, always proceed to APP_RESOLVE. Even if decomposition fails,
+        // the legacy single-task pipeline remains functional.
+        return State.APP_RESOLVE;
+    }
+
+    /**
+     * Build prompt for TASK_DECOMPOSE.
+     */
+    private String buildTaskDecomposePrompt(Context ctx) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<String, Object> c : ctx.appCandidates) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            String pkg = stringOrEmpty(c.get("package"));
+            String name = stringOrEmpty(c.get("name"));
+            if (pkg.isEmpty()) continue;
+            row.put("package", pkg);
+            row.put("name", name);
+            rows.add(row);
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("apps", rows);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("You are an assistant that decomposes a high-level Android user task into a small number of high-level sub_tasks.\n");
+        sb.append("User task (Chinese or English):\n");
+        sb.append(ctx.userTask != null ? ctx.userTask : "").append("\n\n");
+        sb.append("Installed apps (JSON array with {\"package\",\"name\"}):\n");
+        sb.append(Json.stringify(payload)).append("\n\n");
+        sb.append("Output JSON only, no extra text:\n");
+        sb.append("{\"sub_tasks\":[{...}],\"task_type\":\"single|loop|mixed\"}\n");
+        sb.append("Definition of sub_task (very important):\n");
+        sb.append("- A sub_task is a self-contained sub-goal that the agent can execute as a mini-workflow.\n");
+        sb.append("- It is NOT a single UI click or a tiny step inside one screen.\n");
+        sb.append("- It usually corresponds to one user-intent like \"view my followers\" or \"send a message with a link\".\n");
+        sb.append("- All low-level UI steps (open app, tap tabs, tap buttons) to achieve that intent belong INSIDE one sub_task, not as separate sub_tasks.\n");
+        sb.append("\n");
+        sb.append("When to create multiple sub_tasks:\n");
+        sb.append("- If the user describes multiple distinct goals or phases, even in the same app, use multiple sub_tasks.\n");
+        sb.append("  Example: \"open Xiaohongshu, check my followers, then check my following\" ->\n");
+        sb.append("    sub_task_1: open Xiaohongshu and view my followers.\n");
+        sb.append("    sub_task_2: open Xiaohongshu and view my following.\n");
+        sb.append("- If the user task involves multiple apps (e.g., copy link in app A, send link in app B), use multiple sub_tasks (one per high-level goal).\n");
+        sb.append("- If the task is a single simple goal in one app, use exactly one sub_task.\n");
+        sb.append("\n");
+        sb.append("What NOT to do (wrong decomposition):\n");
+        sb.append("- Do NOT break a single high-level goal into micro-steps per click.\n");
+        sb.append("  Wrong: \"open app\", \"tap Me\", \"tap Followers\" as three sub_tasks.\n");
+        sb.append("  Correct: one sub_task \"open the app and view my followers\".\n");
+        sb.append("- Do NOT create one sub_task per UI element on a single page.\n");
+        sb.append("\n");
+        sb.append("Meaning of modes:\n");
+        sb.append("- mode=\"single\": the sub_task is executed once and has a single completion condition.\n");
+        sb.append("  Examples: post one dynamic, send one message, view my followers once.\n");
+        sb.append("- mode=\"loop\": the sub_task needs to repeat an operation over a set of items whose size is not known from the text.\n");
+        sb.append("  Examples: sign in to all forums, like all unread posts, clear all unread notifications.\n");
+        sb.append("- For loop sub_tasks, do NOT create one sub_task per item; instead create a single loop sub_task that covers all items.\n");
+        sb.append("\n");
+        sb.append("Each sub_task MUST have fields: id, description, mode, app_hint, inputs, outputs, success_criteria.\n");
+        sb.append("Additional rules:\n");
+        sb.append("1) mode is either \"single\" or \"loop\".\n");
+        sb.append("2) For loop sub_tasks, add loop_metadata with loop_unit, loop_target_condition, loop_termination_criteria, max_iterations.\n");
+        sb.append("3) Use app_hint to prefer an installed app when obvious (e.g. Bilibili, Taobao, WeChat).\n");
+        sb.append("4) If the task is simple and fits in one app, return a single sub_task.\n");
+        sb.append("5) For multi-app tasks, break into multiple sub_tasks and wire outputs/inputs.\n");
+        sb.append("6) sub_tasks count should usually be between 1 and 5, never dozens.\n");
+        sb.append("7) Do NOT output markdown, code fences, or comments.\n");
+        return sb.toString();
+    }
+
+    /**
+     * System prompt for TASK_DECOMPOSE to enforce JSON-only output.
+     */
+    private String buildTaskDecomposeSystemPrompt() {
+        return "You are an assistant that decomposes a high-level Android user task into a small number of high-level sub_tasks for an automation agent.\n"
+                + "sub_tasks are independent sub-goals (like \"view my followers\" or \"send a link\"), NOT individual button clicks.\n"
+                + "You MUST output strict JSON with fields: sub_tasks (array) and task_type.\n"
+                + "Do not output markdown, code fences, or any commentary outside the JSON.";
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<SubTask> parseSubTasksFromObject(Map<String, Object> obj) {
+        List<SubTask> subs = new ArrayList<>();
+        Object subTasksObj = obj.get("sub_tasks");
+        if (!(subTasksObj instanceof List)) {
+            return subs;
+        }
+        List<?> arr = (List<?>) subTasksObj;
+        for (Object item : arr) {
+            if (!(item instanceof Map)) continue;
+            Map<String, Object> m = (Map<String, Object>) item;
+            SubTask st = new SubTask();
+            st.id = stringOrEmpty(m.get("id"));
+            st.description = stringOrEmpty(m.get("description"));
+            st.mode = stringOrEmpty(m.get("mode")).toLowerCase(Locale.ROOT);
+            st.appHint = stringOrEmpty(m.get("app_hint"));
+            st.successCriteria = stringOrEmpty(m.get("success_criteria"));
+
+            Object inputsObj = m.get("inputs");
+            if (inputsObj instanceof List) {
+                for (Object v : (List<?>) inputsObj) {
+                    String s = stringOrEmpty(v);
+                    if (!s.isEmpty()) {
+                        st.inputs.add(s);
+                    }
+                }
+            }
+            Object outputsObj = m.get("outputs");
+            if (outputsObj instanceof List) {
+                for (Object v : (List<?>) outputsObj) {
+                    String s = stringOrEmpty(v);
+                    if (!s.isEmpty()) {
+                        st.outputs.add(s);
+                    }
+                }
+            }
+
+            Object loopObj = m.get("loop_metadata");
+            if (loopObj instanceof Map) {
+                Map<String, Object> lm = (Map<String, Object>) loopObj;
+                LoopMetadata md = new LoopMetadata();
+                md.loopUnit = stringOrEmpty(lm.get("loop_unit"));
+                md.loopTargetCondition = stringOrEmpty(lm.get("loop_target_condition"));
+                md.loopTerminationCriteria = stringOrEmpty(lm.get("loop_termination_criteria"));
+                String maxItStr = stringOrEmpty(lm.get("max_iterations"));
+                try {
+                    if (!maxItStr.isEmpty()) {
+                        md.maxIterations = Integer.parseInt(maxItStr);
+                    }
+                } catch (NumberFormatException ignored) {
+                    md.maxIterations = 0;
+                }
+                st.loopMetadata = md;
+            }
+
+            subs.add(st);
+        }
+        return subs;
+    }
+
     /**
      * Build LLM prompt for APP_RESOLVE, similar in spirit to Python PromptBuilder(APP_RESOLVE).
      */
@@ -624,7 +1047,8 @@ public class CortexFsmEngine {
         INSTRUCTION_ARITY.put("INPUT", new int[]{1, 1});
         INSTRUCTION_ARITY.put("WAIT", new int[]{1, 1});
         INSTRUCTION_ARITY.put("BACK", new int[]{0, 0});
-        INSTRUCTION_ARITY.put("DONE", new int[]{0, 0});
+        // DONE can optionally carry a natural-language summary tail.
+        INSTRUCTION_ARITY.put("DONE", new int[]{0, 9999});
         INSTRUCTION_ARITY.put("FAIL", new int[]{1, 9999});
     }
 
@@ -916,12 +1340,12 @@ public class CortexFsmEngine {
             noMapEv.put("package", pkg);
             noMapEv.put("map_path", mapFile.getAbsolutePath());
             trace.event("fsm_route_plan_no_map", noMapEv);
-            // 路由阶段将按照“无路径”模式执行：启动应用后直接进入 VISION_ACT。
+            // No map available: continue to ROUTING, then fall through to VISION_ACT.
             return State.ROUTING;
         }
 
         // 3) Map exists: load RouteMap and ask LLM to choose target_page.
-        RouteMap routeMap;
+        RouteMap routeMap = null;
         try {
             routeMap = RouteMap.loadFromFile(mapFile);
         } catch (Exception e) {
@@ -933,7 +1357,7 @@ public class CortexFsmEngine {
             fail.put("map_path", mapFile.getAbsolutePath());
             fail.put("reason", ctx.error);
             trace.event("fsm_route_plan_map_load_failed", fail);
-            // 不中断流水线，仍然进入 ROUTING，由 ROUTING 做无 map 模式处理。
+            // Keep pipeline consistent: ROUTING handles no-map mode.
             return State.ROUTING;
         }
 
@@ -1323,7 +1747,7 @@ public class CortexFsmEngine {
 
         String cmd = extractTagText(text, "command");
         if (cmd.isEmpty()) {
-            // No command tag – keep raw text as command and no structured fields.
+            // No command tag 鈥?keep raw text as command and no structured fields.
             return new ExtractResult(text, new LinkedHashMap<String, Object>());
         }
 
@@ -1432,7 +1856,7 @@ public class CortexFsmEngine {
         try {
             shotResp = perception != null ? perception.handleScreenshot() : null;
             if (shotResp != null && shotResp.length > 1 && shotResp[0] != 0x00) {
-                // 协议约定：第 1 字节为状态，其余为 PNG 数据。
+                // Protocol: first byte is status, remaining bytes are PNG data.
                 screenshotPng = Arrays.copyOfRange(shotResp, 1, shotResp.length);
                 imageSize = screenshotPng.length;
                 Map<String, Object> readyEv = new LinkedHashMap<>();
@@ -1455,7 +1879,7 @@ public class CortexFsmEngine {
         // Refresh activity + streak tracking
         refreshActivity(ctx);
 
-        // Build full VISION_ACT prompt identical to Python PromptBuilder.build(..., VISION_ACT)
+        // Build full VISION_ACT prompt, extended with current sub_task contract when available.
         String prompt = buildVisionPrompt(ctx);
         Map<String, Object> promptEv = new LinkedHashMap<>();
         promptEv.put("task_id", ctx.taskId);
@@ -1463,10 +1887,10 @@ public class CortexFsmEngine {
         promptEv.put("prompt", prompt);
         trace.event("llm_prompt_vision_act", promptEv);
 
-        String raw;
+        String raw = "";
         try {
             LlmConfig cfg = LlmConfig.loadDefault();
-            // 如果是 /v1/responses 且支持 VLM，这里会把 screenshotPng 一并发给模型。
+            // Send multimodal request (prompt + screenshot) via chat/completions.
             raw = llmClient.chatOnce(cfg, null, prompt, screenshotPng);
         } catch (Exception e) {
             ctx.error = "planner_call_failed:VISION_ACT:" + e;
@@ -1485,27 +1909,71 @@ public class CortexFsmEngine {
         respEv.put("response", snippet != null ? snippet : "");
         trace.event("llm_response_vision_act", respEv);
 
-        // Extract <command> and structured tags (Java port of _extract_structured_command)
-        ExtractResult er = extractStructuredCommandForVision(raw);
-        String commandText = er.commandText;
-        Map<String, Object> structured = er.structured;
+        // Parse the agreed regex-friendly output tags.
+        String observing = extractTagText(raw, "Observing");
+        String observeResult = extractTagText(raw, "Ovserve_result");
+        String judging = extractTagText(raw, "Judging");
+        String judgeResult = extractTagText(raw, "Judge_result");
+        String thinking = extractTagText(raw, "Thinking");
+        String actionText = extractTagText(raw, "action");
+        String expectedText = extractTagText(raw, "expected");
+        String commandText = extractTagText(raw, "command");
 
-        if (structured != null && !structured.isEmpty()) {
-            Map<String, Object> hist = new LinkedHashMap<>();
-            hist.put("state", State.VISION_ACT.name());
-            hist.put("structured", structured);
-            hist.put("command", commandText);
-            ctx.llmHistory.add(hist);
-            collectLesson(ctx, structured);
-            Map<String, Object> stEv = new LinkedHashMap<>();
-            stEv.put("task_id", ctx.taskId);
-            stEv.put("state", State.VISION_ACT.name());
-            stEv.put("data", structured);
-            stEv.put("command", commandText);
-            trace.event("llm_structured_vision_act", stEv);
+        // Backward compatibility: if <command> is missing, try old extractor.
+        if (commandText == null || commandText.trim().isEmpty()) {
+            ExtractResult er = extractStructuredCommandForVision(raw);
+            commandText = er.commandText;
         }
 
-        // Normalize JSON outputs to DSL if needed (Java port of _normalize_model_output for VISION_ACT)
+        Map<String, Object> structured = new LinkedHashMap<>();
+        structured.put("Observing", observing);
+        structured.put("Ovserve_result", observeResult);
+        structured.put("Judging", judging);
+        structured.put("Judge_result", judgeResult);
+        structured.put("Thinking", thinking);
+        structured.put("action", actionText);
+        structured.put("expected", expectedText);
+        structured.put("command", commandText);
+
+        Map<String, Object> hist = new LinkedHashMap<>();
+        hist.put("state", State.VISION_ACT.name());
+        hist.put("structured", structured);
+        hist.put("command", commandText);
+        ctx.llmHistory.add(hist);
+
+        Map<String, Object> stEv = new LinkedHashMap<>();
+        stEv.put("task_id", ctx.taskId);
+        stEv.put("state", State.VISION_ACT.name());
+        stEv.put("data", structured);
+        stEv.put("command", commandText);
+        trace.event("llm_structured_vision_act", stEv);
+
+        // External history maintenance:
+        // previous instruction/expected are matched with current actual/judgement.
+        if (!ctx.pendingHistoryInstruction.isEmpty() || !ctx.pendingHistoryExpected.isEmpty()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("instruction", ctx.pendingHistoryInstruction);
+            row.put("expected", ctx.pendingHistoryExpected);
+            String actual = !observeResult.isEmpty() ? observeResult : observing;
+            row.put("actual", actual);
+            row.put("judgement", !judgeResult.isEmpty() ? judgeResult : "unknown");
+            ctx.visionHistory.add(row);
+            while (ctx.visionHistory.size() > 8) {
+                ctx.visionHistory.remove(0);
+            }
+
+            Map<String, Object> hEv = new LinkedHashMap<>();
+            hEv.put("task_id", ctx.taskId);
+            hEv.put("row", row);
+            hEv.put("history_size", ctx.visionHistory.size());
+            trace.event("vision_history_append", hEv);
+        }
+
+        // Stash next pair for history matching in next turn.
+        ctx.pendingHistoryInstruction = actionText != null ? actionText.trim() : "";
+        ctx.pendingHistoryExpected = expectedText != null ? expectedText.trim() : "";
+
+        // Normalize JSON outputs to DSL if needed.
         String normalized = normalizeModelOutput(commandText != null && !commandText.isEmpty() ? commandText : raw, State.VISION_ACT, ctx);
 
         // Parse DSL instructions (single command per vision turn)
@@ -1547,6 +2015,11 @@ public class CortexFsmEngine {
 
         for (Instruction cmd : commands) {
             if ("DONE".equals(cmd.op)) {
+                String doneSummary = cmd.args.isEmpty() ? "" : String.join(" ", cmd.args).trim();
+                if (doneSummary.isEmpty()) {
+                    doneSummary = !observeResult.isEmpty() ? observeResult : "";
+                }
+                storeSubTaskSummary(ctx, doneSummary);
                 return State.FINISH;
             }
             if ("FAIL".equals(cmd.op)) {
@@ -1704,118 +2177,115 @@ public class CortexFsmEngine {
      * Build full VISION_ACT prompt, mirroring Python PromptBuilder.build(..., VISION_ACT).
      */
     private String buildVisionPrompt(Context ctx) {
-        String activitySig = stringOrEmpty(ctx.currentActivity.get("package"))
-                + "/" + stringOrEmpty(ctx.currentActivity.get("activity"));
-
-        String deviceInfoJson = Json.stringify(ctx.deviceInfo);
-        List<String> recentTrace = ctx.routeTrace.size() > 8
-                ? ctx.routeTrace.subList(ctx.routeTrace.size() - 8, ctx.routeTrace.size())
-                : new ArrayList<>(ctx.routeTrace);
-        Map<String, Object> recent = new LinkedHashMap<>();
-        recent.put("trace", recentTrace);
-        String recentTraceJson = Json.stringify(recentTrace);
-
-        // We do not yet maintain full llm_history/lessons; keep them empty arrays for now.
-        String llmHistoryJson = Json.stringify(new ArrayList<>());
-        String lessonsJson = Json.stringify(new ArrayList<>());
+        SubTask st = ctx.currentSubTask;
+        String globalRequest = ctx.rootUserTask != null ? ctx.rootUserTask : "";
+        String objective = (st != null && st.description != null && !st.description.trim().isEmpty())
+                ? st.description.trim()
+                : (ctx.userTask != null ? ctx.userTask : "");
+        String mode = (st != null && st.mode != null && !st.mode.trim().isEmpty())
+                ? st.mode.trim().toLowerCase(Locale.ROOT)
+                : "single";
+        String completion = (st != null && st.successCriteria != null && !st.successCriteria.trim().isEmpty())
+                ? st.successCriteria.trim()
+                : "Complete the current objective with clear visible evidence.";
 
         StringBuilder sb = new StringBuilder();
-        sb.append("State=VISION_ACT\n");
-        sb.append("Output Contract:\n");
-        sb.append("1) Output MUST follow the state XML-like format exactly.\n");
-        sb.append("2) Output MUST contain exactly one <command>...</command>.\n");
-        sb.append("3) No JSON, no markdown, no extra prose outside tags.\n");
-        sb.append("4) If you cannot decide safely, command must be FAIL <reason>.\n");
-        sb.append("Output Format (strict):\n");
-        sb.append("<vision_analysis>\n");
-        sb.append("<page_state>...</page_state>\n");
-        sb.append("<step_review>...</step_review>\n");
-        sb.append("<reflection>...</reflection>\n");
-        sb.append("<next_step_reasoning>...</next_step_reasoning>\n");
-        sb.append("<completion_gate>...</completion_gate>\n");
-        sb.append("<done_confirm>...</done_confirm>\n");
-        sb.append("<lesson>...</lesson>\n");
-        sb.append("</vision_analysis>\n");
-        sb.append("<command>DSL_COMMAND_HERE</command>\n");
-        sb.append("DSL Semantics (only allowed ops):\n");
-        sb.append("- TAP <x> <y>: tap at the target position.\n");
-        sb.append("- SWIPE <x1> <y1> <x2> <y2> <duration_ms>: swipe from start to end with duration in ms.\n");
-        sb.append("  SWIPE Rule: x1,y1 MUST be inside the main scrollable content container (not nav bar / title bar / edge controls).\n");
-        sb.append("  Prefer small exploratory swipes near screen/content center.\n");
-        sb.append("  Keep swipe distance small (about 8%~18% of screen height) unless a larger move is explicitly needed.\n");
-        sb.append("  Prefer smoother/longer gesture duration (about 450~900ms).\n");
-        sb.append("- INPUT \"<text>\": input text into focused field.\n");
-        sb.append("- WAIT <ms>: wait milliseconds.\n");
-        sb.append("- BACK: press Android back key once.\n");
-        sb.append("- DONE: task complete.\n");
-        sb.append("- FAIL <reason>: stop with explicit reason.\n");
-        sb.append("Allowed: TAP, SWIPE, INPUT, WAIT, BACK, DONE, FAIL\n");
-        sb.append("UserTask: ").append(ctx.userTask != null ? ctx.userTask : "").append("\n");
-        sb.append("CurrentActivity(JSON): ").append(Json.stringify(ctx.currentActivity)).append("\n");
-        sb.append("ActivitySignature: ").append(activitySig).append("\n");
-        sb.append("SameActivityStreak: ").append(ctx.sameActivityStreak).append("\n");
-        sb.append("LastCommand: ").append(ctx.lastCommand != null && !ctx.lastCommand.isEmpty() ? ctx.lastCommand : "<none>").append("\n");
-        sb.append("SameCommandStreak: ").append(ctx.sameCommandStreak).append("\n");
-        sb.append("RecentRouteTrace(JSON): ").append(recentTraceJson).append("\n");
-        sb.append("RecentLLMHistory(JSON): ").append(llmHistoryJson).append("\n");
-        sb.append("Lessons(JSON): ").append(lessonsJson).append("\n");
-        sb.append("Screenshot: attached in this request.\n");
-        sb.append("State Goal:\n");
-        sb.append("Choose ONLY the next best single action.\n");
-        sb.append("Important: one turn = one command. Do NOT output TAP then DONE in the same response.\n");
-        sb.append("SWIPE Constraint: if using SWIPE, start point must be inside the scrollable content container, avoid starting from top/bottom bars.\n");
-        sb.append("SWIPE Strategy: prefer small-distance swipe around center to probe nearby unseen content first.\n");
-        sb.append("SWIPE Default Profile: distance about 8%~18% screen height, duration about 450~900ms.\n");
-        sb.append("Reflection Contract (strict):\n");
-        sb.append("1) You MUST review recent 3~6 steps, not only the last step.\n");
-        sb.append("2) Use <step_review> to list per-step outcomes in order:\n");
-        sb.append("   Step-1: command=..., page_change=..., result=...\n");
-        sb.append("   Step-2: command=..., page_change=..., result=...\n");
-        sb.append("3) In <reflection>, summarize what the agent is actually doing across steps,\n");
-        sb.append("   identify repeated ineffective intents, and state what intent to avoid next.\n");
-        sb.append("3.5) <lesson> is OPTIONAL. Only output it when there is a reusable cross-step rule.\n");
-        sb.append("     Keep lesson concise (<= 1 sentence). If no stable lesson, omit it.\n");
-        sb.append("4) <command> must be consistent with <reflection> (cannot repeat the avoided intent).\n");
-        sb.append("5) If recent steps show repeated no-progress, prioritize changing action type.\n");
-        sb.append("   Example: TAP -> small SWIPE near center / BACK / WAIT.\n");
-        sb.append("If recent lessons indicate repeated failure, change action type (prefer SWIPE/BACK/WAIT over repeating same TAP intent).\n");
-        sb.append("Anti-loop Rule: if activity/screen seems unchanged and last command already repeated, do NOT repeat same TAP.\n");
-        sb.append("In that case, choose another action (SWIPE/WAIT/INPUT) or output FAIL with reason.\n");
-        sb.append("DONE Gate (strict):\n");
-        sb.append("You are NOT allowed to output DONE unless completion evidence and coverage verification both pass.\n");
-        sb.append("Visible complete is NOT equal to global complete.\n");
-        sb.append("Before DONE, <completion_gate> must include:\n");
-        sb.append("- <completion_claim>: what goal is completed and visible evidence.\n");
-        sb.append("- <coverage_check>: passed|failed + reason.\n");
-        sb.append("- <verification_actions>: what checks were already executed.\n");
-        sb.append("Coverage verification rule (universal):\n");
-        sb.append("- If task may involve scrollable/unseen content, verify coverage first.\n");
-        sb.append("- Coverage is considered passed only if one condition holds:\n");
-        sb.append("  A) at least two exploratory swipes with no new actionable targets,\n");
-        sb.append("  B) explicit end-of-list/end marker visible,\n");
-        sb.append("  C) repeated explored states with no new targets after verification actions.\n");
-        sb.append("If coverage_check is failed, command MUST NOT be DONE.\n");
-        sb.append("DONE Confirm Contract (strict):\n");
-        sb.append("You MUST provide <done_confirm> with all fields below:\n");
-        sb.append("- <goal_match>: pass|fail + reason\n");
-        sb.append("- <coverage_check>: pass|fail + reason\n");
-        sb.append("- <new_info_check>: pass|fail + reason\n");
-        sb.append("- <final_decision>: DONE|NOT_DONE\n");
-        sb.append("Hard Rule: command=DONE is allowed ONLY when all three checks are pass and final_decision=DONE.\n");
-        sb.append("If any check is fail, final_decision MUST be NOT_DONE and command MUST NOT be DONE.\n");
-        sb.append("If finished now and DONE gate passed, output DONE only.\n");
-        sb.append("Examples:\n");
-        sb.append("<vision_analysis><page_state>当前在标签列表页，存在多个可操作入口</page_state>");
-        sb.append("<step_review>Step-1: command=TAP 890 67, page_change=进入签到页, result=有效; ");
-        sb.append("Step-2: command=TAP 720 420, page_change=无明显变化, result=尝试无效; ");
-        sb.append("Step-3: command=TAP 720 420, page_change=无明显变化, result=重复无效</step_review>");
-        sb.append("<reflection>最近步骤表明相同动作连续无效，当前策略停留在原地重复。");
-        sb.append("应避免继续重复该动作意图，改为滑动探索更多可签入口。</reflection>");
-        sb.append("<next_step_reasoning>先下滑一屏扩展可见区域，再选择新的可执行入口。</next_step_reasoning>");
-        sb.append("<completion_gate><completion_claim>当前仅确认可见区域状态</completion_claim>");
-        sb.append("<coverage_check>failed: 仍可能存在未展示内容</coverage_check>");
-        sb.append("<verification_actions>尚未完成覆盖验证</verification_actions></completion_gate></vision_analysis>\n");
-        sb.append("<command>SWIPE 640 800 640 700 650</command>\n");
+        sb.append("You are a mobile UI agent. Focus on completing the current objective safely.\n\n");
+
+        sb.append("[TASK_BLOCK]\n");
+        sb.append("Global request: ").append(globalRequest).append("\n");
+        sb.append("Current objective: ").append(objective).append("\n");
+        sb.append("Mode: ").append(mode).append("\n");
+        sb.append("Completion condition: ").append(completion).append("\n");
+        sb.append("Guidance:\n");
+        sb.append("- single: finish once evidence of completion is present.\n");
+        sb.append("- loop: continue until no pending target remains.\n\n");
+
+        sb.append("[HISTORY_BLOCK]\n");
+        if (ctx.visionHistory.isEmpty()) {
+            sb.append("Recent turns: none\n");
+        } else {
+            sb.append("Recent turns (oldest -> newest):\n");
+            for (int i = 0; i < ctx.visionHistory.size(); i++) {
+                Map<String, Object> row = ctx.visionHistory.get(i);
+                sb.append(i + 1).append(") action: ").append(stringOrEmpty(row.get("instruction"))).append("\n");
+                sb.append("   expected: ").append(stringOrEmpty(row.get("expected"))).append("\n");
+                sb.append("   actual: ").append(stringOrEmpty(row.get("actual"))).append("\n");
+                sb.append("   judgement: ").append(stringOrEmpty(row.get("judgement"))).append("\n");
+            }
+        }
+        sb.append("History guidance:\n");
+        sb.append("- Do not repeat actions that already failed with no_effect/wrong_target.\n");
+        sb.append("- If repeated no progress, change action strategy.\n\n");
+
+        sb.append("[ACTION_BLOCK]\n");
+        sb.append("Available actions:\n");
+        sb.append("- TAP x y\n");
+        sb.append("- SWIPE x1 y1 x2 y2 duration_ms\n");
+        sb.append("- INPUT \"text\"\n");
+        sb.append("- WAIT ms\n");
+        sb.append("- BACK\n");
+        sb.append("- DONE summary_text\n");
+        sb.append("Action semantics and parameters:\n");
+        sb.append("1) TAP x y: tap one target point. x/y are coordinates.\n");
+        sb.append("2) SWIPE x1 y1 x2 y2 duration_ms: drag to scroll/reveal more content.\n");
+        sb.append("3) INPUT \"text\": input text into focused input field.\n");
+        sb.append("4) WAIT ms: wait for UI/network transition.\n");
+        sb.append("5) BACK: press Android back once.\n");
+        sb.append("6) DONE summary_text: terminate current objective with concise summary.\n");
+        sb.append("Constraints:\n");
+        sb.append("- One turn chooses one primary action.\n");
+        sb.append("- If repeated no progress, change action type/intent.\n");
+        sb.append("- Prefer safe, incremental exploration before failure.\n\n");
+
+        sb.append("[PASSED_CONTEXT_BLOCK]\n");
+        if (ctx.blackboard.isEmpty()) {
+            sb.append("Information from previous sub-tasks:\n- none\n");
+        } else {
+            sb.append("Information from previous sub-tasks:\n");
+            int n = 0;
+            for (Map.Entry<String, Object> e : ctx.blackboard.entrySet()) {
+                if (n >= 8) break;
+                String val = stringOrEmpty(e.getValue());
+                if (val.isEmpty()) continue;
+                sb.append("- ").append(val).append("\n");
+                n++;
+            }
+            if (n == 0) {
+                sb.append("- none\n");
+            }
+        }
+        sb.append("Usage guidance:\n");
+        sb.append("- Use relevant items when useful for this objective.\n");
+        sb.append("- Ignore irrelevant items safely.\n\n");
+
+        sb.append("[SCREENSHOT_BLOCK]\n");
+        sb.append("Screenshot: attached\n\n");
+
+        sb.append("[OUTPUT_BLOCK]\n");
+        sb.append("You MUST output exactly the following tags in this exact order:\n");
+        sb.append("<Observing>...</Observing>\n");
+        sb.append("<Ovserve_result>...</Ovserve_result>\n");
+        sb.append("<Judging>...</Judging>\n");
+        sb.append("<Judge_result>...</Judge_result>\n");
+        sb.append("<Thinking>...</Thinking>\n");
+        sb.append("<action>...</action>\n");
+        sb.append("<expected>...</expected>\n");
+        sb.append("<command>...</command>\n");
+        sb.append("Field meaning:\n");
+        sb.append("- <Observing>: describe what is currently visible and relevant to the current objective.\n");
+        sb.append("- <Ovserve_result>: one-sentence summary of current page/result; used as actual outcome.\n");
+        sb.append("- <Judging>: evaluate previous action vs previous expected result; explain mismatch cause if any.\n");
+        sb.append("- <Judge_result>: one-sentence judgement for previous action.\n");
+        sb.append("- <Thinking>: analyze current situation and decide next strategy.\n");
+        sb.append("- <action>: one short natural-language next action intent.\n");
+        sb.append("- <expected>: expected result after next action.\n");
+        sb.append("- <command>: executable command string.\n");
+        sb.append("Special first-turn rule:\n");
+        sb.append("- If there is no previous action/history, output:\n");
+        sb.append("  <Judging>none</Judging>\n");
+        sb.append("  <Judge_result>none</Judge_result>\n");
+        sb.append("Do not output markdown, code fences, JSON, or any extra text outside these tags.\n");
 
         return sb.toString();
     }
@@ -1878,3 +2348,4 @@ public class CortexFsmEngine {
         }
     }
 }
+
