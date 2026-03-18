@@ -131,6 +131,8 @@ public class CortexFsmEngine {
     private static final long UI_SETTLE_FALLBACK_MS = 600L;
     private static final double UI_SETTLE_SIM_THRESHOLD = 0.90d;
     private static final int UI_SETTLE_REQUIRED_HITS = 2;
+    private static final int VISION_MAX_TURNS_SINGLE = 30;
+    private static final int VISION_MAX_TURNS_LOOP = 60;
 
     // Allowed ops per state, mirroring Python _ALLOWED_OPS
     private static final java.util.Set<String> VISION_ALLOWED_OPS = new java.util.HashSet<>();
@@ -215,7 +217,7 @@ public class CortexFsmEngine {
         ctx.mapPath = mapPath;
         ctx.startPage = startPage;
         ctx.userPlaybook = userPlaybook != null ? userPlaybook.trim() : "";
-        if (taskMemoryHint != null && !taskMemoryHint.isEmpty()) {
+        if (ctx.userPlaybook.isEmpty() && taskMemoryHint != null && !taskMemoryHint.isEmpty()) {
             ctx.taskMemoryHint.putAll(taskMemoryHint);
         }
 
@@ -2032,9 +2034,18 @@ public class CortexFsmEngine {
         ev.put("state", State.VISION_ACT.name());
         trace.event("fsm_state_enter", ev);
 
-        // Turn limit (mirror Python FSMConfig.max_vision_turns, default 20)
-        if (ctx.visionTurns >= 20) {
+        // Turn limit by sub_task mode:
+        // - single: 30
+        // - loop: 60
+        int maxTurns = resolveVisionMaxTurns(ctx);
+        if (ctx.visionTurns >= maxTurns) {
             ctx.error = "vision_turn_limit";
+            Map<String, Object> fail = new LinkedHashMap<>();
+            fail.put("task_id", ctx.taskId);
+            fail.put("mode", resolveCurrentSubTaskMode(ctx));
+            fail.put("vision_turns", ctx.visionTurns);
+            fail.put("max_turns", maxTurns);
+            trace.event("vision_turn_limit", fail);
             return State.FAIL;
         }
         ctx.visionTurns += 1;
@@ -2449,6 +2460,25 @@ public class CortexFsmEngine {
             trace.event("exec_action_error", ev);
             return false;
         }
+    }
+
+    private int resolveVisionMaxTurns(Context ctx) {
+        String mode = resolveCurrentSubTaskMode(ctx);
+        if ("loop".equals(mode)) {
+            return VISION_MAX_TURNS_LOOP;
+        }
+        return VISION_MAX_TURNS_SINGLE;
+    }
+
+    private String resolveCurrentSubTaskMode(Context ctx) {
+        String mode = "";
+        if (ctx != null && ctx.currentSubTask != null && ctx.currentSubTask.mode != null) {
+            mode = ctx.currentSubTask.mode.trim().toLowerCase(Locale.ROOT);
+        }
+        if (mode.isEmpty()) {
+            mode = "single";
+        }
+        return mode;
     }
 
     private boolean waitForUiStableByDumpActions(Context ctx, String op) {

@@ -157,7 +157,9 @@ public class CortexTaskManager {
         instance.userPlaybook = userPlaybook != null ? userPlaybook.trim() : "";
         String taskKey = buildTaskMemoryKey(instance.userTask);
         instance.taskMemoryKey = taskKey;
-        Map<String, Object> memoryHint = selectTaskMemoryHint(taskKey, scheduleId);
+        Map<String, Object> memoryHint = instance.userPlaybook.isEmpty()
+                ? selectTaskMemoryHint(taskKey, scheduleId)
+                : null;
         instance.memoryApplied = memoryHint != null && !memoryHint.isEmpty();
         instance.state = TaskState.PENDING;
         instance.createdAt = now;
