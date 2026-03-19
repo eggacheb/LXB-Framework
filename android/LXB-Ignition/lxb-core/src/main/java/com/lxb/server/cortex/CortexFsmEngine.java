@@ -131,6 +131,7 @@ public class CortexFsmEngine {
     private static final int LAUNCH_RETRY_MAX = 3;
     private static final long LAUNCH_WAIT_TIMEOUT_MS = 5000L;
     private static final long LAUNCH_WAIT_SAMPLE_MS = 500L;
+    private static final int LAUNCH_READY_REQUIRED_HITS = 2;
     private static final int INPUT_METHOD_ADB = 0;
     private static final int INPUT_METHOD_CLIPBOARD = 1;
     private static final long UI_SETTLE_TIMEOUT_MS = 2500L;
@@ -146,11 +147,7 @@ public class CortexFsmEngine {
     private static final long UNLOCK_STABLE_TIMEOUT_MS = 3000L;
     private static final long UNLOCK_STABLE_SAMPLE_MS = 300L;
     private static final int UNLOCK_STABLE_REQUIRED_HITS = 2;
-    private static final long STOP_POST_CMD_SLEEP_MS = 350L;
-    private static final long STOP_WAIT_EXIT_TIMEOUT_MS = 2200L;
-    private static final long STOP_WAIT_EXIT_SAMPLE_MS = 250L;
     private static final int KEYCODE_HOME = 3;
-    private static final int KEYCODE_ENTER = 66;
     private static final int KEYCODE_POWER = 26;
 
     // Allowed ops per state, mirroring Python _ALLOWED_OPS
@@ -336,32 +333,9 @@ public class CortexFsmEngine {
                 subBegin.put("app_hint", st.appHint);
                 trace.event("fsm_sub_task_begin", subBegin);
 
-                boolean memoryFastPathUsed = false;
-                boolean memoryFastPathFallbackUsed = false;
-                String fastPathPkg = resolveMemoryFastPathPackage(ctx);
-                if (!fastPathPkg.isEmpty()) {
-                    ctx.selectedPackage = fastPathPkg;
-                    String memoryTargetPage = stringOrEmpty(ctx.taskMemoryHint.get("target_page"));
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("task_id", ctx.taskId);
-                    m.put("index", idx);
-                    m.put("sub_task_id", st.id);
-                    m.put("package", fastPathPkg);
-                    m.put("mode", "route_pipeline");
-                    m.put("memory_target_page", memoryTargetPage);
-                    m.put("memory_summary", stringOrEmpty(ctx.taskMemoryHint.get("summary_text")));
-                    trace.event("fsm_memory_fast_path", m);
-                    memoryFastPathUsed = true;
-                    anyMemoryFastPathUsed = true;
-                    // Safety: memory fast path only skips APP_RESOLVE.
-                    // Keep ROUTE_PLAN/ROUTING to ensure deterministic entry page.
-                    if (!memoryTargetPage.isEmpty() && (ctx.targetPage == null || ctx.targetPage.trim().isEmpty())) {
-                        ctx.targetPage = memoryTargetPage;
-                    }
-                    state = State.ROUTE_PLAN;
-                } else {
-                    state = State.APP_RESOLVE;
-                }
+                // Memory fast path is intentionally disabled for now.
+                // Always use the full pipeline to keep execution deterministic.
+                state = State.APP_RESOLVE;
                 for (int step = 0; step < 30; step++) {
                     if (cancellationChecker != null && cancellationChecker.isCancelled()) {
                         ctx.error = "cancelled_by_user";
@@ -385,31 +359,6 @@ public class CortexFsmEngine {
                     }
                     if (state == State.VISION_ACT) {
                         state = runVisionActState(ctx);
-                        continue;
-                    }
-                    if (state == State.FAIL && memoryFastPathUsed && !memoryFastPathFallbackUsed) {
-                        // Fallback once to full pipeline if fast path fails.
-                        memoryFastPathFallbackUsed = true;
-                        anyMemoryFastPathFallback = true;
-                        memoryFastPathUsed = false;
-                        Map<String, Object> m = new LinkedHashMap<>();
-                        m.put("task_id", ctx.taskId);
-                        m.put("index", idx);
-                        m.put("sub_task_id", st.id);
-                        m.put("reason", ctx.error);
-                        trace.event("fsm_memory_fast_path_fallback", m);
-                        ctx.error = "";
-                        ctx.routeResult.clear();
-                        ctx.targetPage = "";
-                        ctx.visionTurns = 0;
-                        ctx.lastCommand = "";
-                        ctx.sameCommandStreak = 0;
-                        ctx.sameActivityStreak = 0;
-                        ctx.visionHistory.clear();
-                        ctx.pendingHistoryInstruction = "";
-                        ctx.pendingHistoryExpected = "";
-                        ctx.pendingHistoryCarryContext = "";
-                        state = State.APP_RESOLVE;
                         continue;
                     }
                     if (state == State.FINISH || state == State.FAIL) {
@@ -1622,6 +1571,17 @@ public class CortexFsmEngine {
             hasMap = false;
         }
 
+        Map<String, Object> planEv = new LinkedHashMap<>();
+        planEv.put("task_id", ctx.taskId);
+        planEv.put("package", pkg);
+        planEv.put("has_map", hasMap);
+        planEv.put("map_path", ctx.mapPath != null ? ctx.mapPath : "");
+        planEv.put("from_page", fromPage);
+        planEv.put("to_page", toPage);
+        planEv.put("path_steps", path != null ? path.size() : 0);
+        planEv.put("start_page_override", ctx.startPage != null && !ctx.startPage.trim().isEmpty());
+        trace.event("fsm_routing_plan", planEv);
+
         // 2) Launch app once for both map and no-map modes.
         boolean launchOk = launchAppForRouting(ctx, pkg);
         Map<String, Object> launchEv = new LinkedHashMap<>();
@@ -1639,6 +1599,13 @@ public class CortexFsmEngine {
             trace.event("fsm_routing_failed", fail);
             return State.FAIL;
         }
+
+        Map<String, Object> uiEv = new LinkedHashMap<>();
+        uiEv.put("task_id", ctx.taskId);
+        uiEv.put("package", pkg);
+        uiEv.put("mode", hasMap ? "map" : "no_map");
+        uiEv.put("ui", captureRoutingUiFingerprint());
+        trace.event("fsm_routing_post_launch_ui", uiEv);
 
         // No-map mode: nothing to tap, route_result just records launch.
         if (!hasMap || path == null || path.isEmpty()) {
@@ -1787,32 +1754,55 @@ public class CortexFsmEngine {
     private boolean launchAppForRouting(Context ctx, String packageName) {
         try {
             for (int attempt = 1; attempt <= LAUNCH_RETRY_MAX; attempt++) {
+                ActivityInfo pre = getCurrentActivityInfoForRouting();
+                Map<String, Object> begin = new LinkedHashMap<>();
+                begin.put("task_id", ctx.taskId);
+                begin.put("package", packageName);
+                begin.put("attempt", attempt);
+                begin.put("pre_package", pre.packageName);
+                begin.put("pre_activity", pre.activityName);
+                begin.put("screen_state", getScreenStateCode());
+                begin.put("lock_hint", isLikelyLockscreenShown());
+                trace.event("fsm_routing_launch_attempt_begin", begin);
+
                 if (!ensureUnlockedBeforeRoute(ctx, packageName, attempt)) {
-                    continue;
-                }
-                // Stop must be confirmed before launch to avoid stale task stack races after unlock.
-                boolean stopReady = stopAppAndWaitForRouting(packageName);
-                if (!stopReady) {
-                    Map<String, Object> ev = new LinkedHashMap<>();
-                    ev.put("package", packageName);
-                    ev.put("attempt", attempt);
-                    ev.put("stop_ready", false);
-                    ev.put("launch_ok", false);
-                    ev.put("package_ready", false);
-                    trace.event("fsm_routing_launch_attempt", ev);
+                    Map<String, Object> skip = new LinkedHashMap<>();
+                    skip.put("task_id", ctx.taskId);
+                    skip.put("package", packageName);
+                    skip.put("attempt", attempt);
+                    skip.put("reason", "unlock_not_ready");
+                    trace.event("fsm_routing_launch_attempt_skip", skip);
                     continue;
                 }
                 boolean launchOk = launchAppClearTaskForRouting(packageName);
                 boolean packageReady = launchOk && waitForForegroundPackageForRouting(
-                        packageName, LAUNCH_WAIT_TIMEOUT_MS, LAUNCH_WAIT_SAMPLE_MS
+                        packageName, LAUNCH_WAIT_TIMEOUT_MS, LAUNCH_WAIT_SAMPLE_MS, LAUNCH_READY_REQUIRED_HITS
                 );
+                ActivityInfo post = getCurrentActivityInfoForRouting();
+                Map<String, Object> uiFingerprint = null;
+                boolean launcherLike = false;
+                if (launchOk && packageReady) {
+                    uiFingerprint = captureRoutingUiFingerprint();
+                    launcherLike = isLikelyLauncherUi(uiFingerprint);
+                    if (launcherLike) {
+                        packageReady = false;
+                    }
+                }
 
                 Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx.taskId);
                 ev.put("package", packageName);
                 ev.put("attempt", attempt);
-                ev.put("stop_ready", true);
+                ev.put("stop_before_start_in_launch", true);
                 ev.put("launch_ok", launchOk);
                 ev.put("package_ready", packageReady);
+                ev.put("post_package", post.packageName);
+                ev.put("post_activity", post.activityName);
+                ev.put("ready_required_hits", LAUNCH_READY_REQUIRED_HITS);
+                ev.put("launcher_like", launcherLike);
+                if (uiFingerprint != null) {
+                    ev.put("ui", uiFingerprint);
+                }
                 trace.event("fsm_routing_launch_attempt", ev);
 
                 if (launchOk && packageReady) {
@@ -1853,12 +1843,20 @@ public class CortexFsmEngine {
         return ok;
     }
 
-    private boolean waitForForegroundPackageForRouting(String expectedPackage, long timeoutMs, long sampleMs) {
+    private boolean waitForForegroundPackageForRouting(
+            String expectedPackage, long timeoutMs, long sampleMs, int requiredHits
+    ) {
         long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMs);
+        int hits = 0;
         while (true) {
             String currentPkg = getCurrentPackageForRouting();
             if (expectedPackage.equals(currentPkg)) {
-                return true;
+                hits += 1;
+                if (hits >= Math.max(1, requiredHits)) {
+                    return true;
+                }
+            } else {
+                hits = 0;
             }
             if (System.currentTimeMillis() >= deadline) {
                 return false;
@@ -1868,20 +1866,6 @@ public class CortexFsmEngine {
             } catch (InterruptedException ignored) {
                 return false;
             }
-        }
-    }
-
-    private boolean waitForForegroundPackageNotForRouting(String blockedPackage, long timeoutMs, long sampleMs) {
-        long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMs);
-        while (true) {
-            String currentPkg = getCurrentPackageForRouting();
-            if (!blockedPackage.equals(currentPkg)) {
-                return true;
-            }
-            if (System.currentTimeMillis() >= deadline) {
-                return false;
-            }
-            sleepQuiet(Math.max(1L, sampleMs));
         }
     }
 
@@ -1942,32 +1926,76 @@ public class CortexFsmEngine {
                 || act.contains("lockscreen");
     }
 
-    private boolean stopAppAndWaitForRouting(String packageName) {
+    private Map<String, Object> captureRoutingUiFingerprint() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        ActivityInfo a = getCurrentActivityInfoForRouting();
+        out.put("package", a.packageName);
+        out.put("activity", a.activityName);
+
         try {
-            byte[] pkgBytes = packageName.getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buf = ByteBuffer.allocate(2 + pkgBytes.length).order(ByteOrder.BIG_ENDIAN);
-            buf.putShort((short) pkgBytes.length);
-            buf.put(pkgBytes);
-            byte[] resp = execution != null ? execution.handleStopApp(buf.array()) : null;
-            boolean stopAck = resp != null && resp.length > 0 && resp[0] == 0x01;
-            sleepQuiet(STOP_POST_CMD_SLEEP_MS);
-            boolean foregroundCleared = waitForForegroundPackageNotForRouting(
-                    packageName, STOP_WAIT_EXIT_TIMEOUT_MS, STOP_WAIT_EXIT_SAMPLE_MS
-            );
-            Map<String, Object> ev = new LinkedHashMap<>();
-            ev.put("package", packageName);
-            ev.put("stop_ack", stopAck);
-            ev.put("foreground_cleared", foregroundCleared);
-            ev.put("result", (stopAck && foregroundCleared) ? "ok" : "retry");
-            trace.event("fsm_routing_stop_app", ev);
-            return stopAck && foregroundCleared;
+            byte[] payload = perception != null ? perception.handleDumpActions(new byte[0]) : null;
+            List<DumpActionsParser.ActionNode> nodes = DumpActionsParser.parse(payload);
+            out.put("node_count", nodes != null ? nodes.size() : 0);
+
+            List<String> samples = new ArrayList<>();
+            if (nodes != null) {
+                for (DumpActionsParser.ActionNode n : nodes) {
+                    String s = "";
+                    if (n != null) {
+                        if (n.text != null && !n.text.trim().isEmpty()) {
+                            s = "text:" + n.text.trim();
+                        } else if (n.contentDesc != null && !n.contentDesc.trim().isEmpty()) {
+                            s = "desc:" + n.contentDesc.trim();
+                        } else if (n.resourceId != null && !n.resourceId.trim().isEmpty()) {
+                            s = "rid:" + n.resourceId.trim();
+                        }
+                    }
+                    if (!s.isEmpty() && !samples.contains(s)) {
+                        samples.add(s);
+                        if (samples.size() >= 8) {
+                            break;
+                        }
+                    }
+                }
+            }
+            out.put("samples", samples);
         } catch (Exception e) {
-            Map<String, Object> ev = new LinkedHashMap<>();
-            ev.put("package", packageName);
-            ev.put("err", String.valueOf(e));
-            trace.event("fsm_routing_stop_err", ev);
+            out.put("dump_actions_error", String.valueOf(e));
+        }
+        return out;
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean isLikelyLauncherUi(Map<String, Object> ui) {
+        if (ui == null || ui.isEmpty()) {
             return false;
         }
+        Object samplesObj = ui.get("samples");
+        if (!(samplesObj instanceof List)) {
+            return false;
+        }
+        List<Object> arr = (List<Object>) samplesObj;
+        if (arr.isEmpty()) {
+            return false;
+        }
+
+        int hit = 0;
+        for (Object o : arr) {
+            String s = stringOrEmpty(o);
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (s.contains("页共") || s.contains("第1屏") || s.contains("第 1 屏")) {
+                hit += 2;
+                continue;
+            }
+            if (s.contains("Play 商店") || s.contains("YouTube") || s.contains("Discord")
+                    || s.contains("王者荣耀") || s.contains("抖音") || s.contains("微博")
+                    || s.contains("智能助理")) {
+                hit += 1;
+            }
+        }
+        return hit >= 2;
     }
 
     private void loadUnlockPolicyFromConfig(Context ctx) {
@@ -2039,7 +2067,7 @@ public class CortexFsmEngine {
             // After wake+swipe, if lockscreen is still shown, try PIN/password.
             if ((stateAfterUnlockCmd != 1 || lockHintAfterUnlockCmd) && !ctx.unlockPin.isEmpty()) {
                 pinTried = true;
-                pinInputOk = tryInputUnlockPin(ctx.unlockPin);
+                pinInputOk = tryInputUnlockPin(ctx, ctx.unlockPin);
                 sleepQuiet(UNLOCK_POST_PIN_SLEEP_MS);
             }
 
@@ -2128,12 +2156,30 @@ public class CortexFsmEngine {
         }
     }
 
-    private boolean tryInputUnlockPin(String pin) {
+    private boolean tryInputUnlockPin(Context ctx, String pin) {
         if (pin == null || pin.trim().isEmpty()) {
             return false;
         }
         String text = pin.trim();
         if (isDigitsOnly(text)) {
+            boolean tapModeOk = tryInputUnlockPinByTap(ctx, text);
+            if (tapModeOk) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx != null ? ctx.taskId : "");
+                ev.put("mode", "tap");
+                ev.put("digits", text.length());
+                ev.put("result", "ok");
+                trace.event("fsm_unlock_pin_input", ev);
+                return true;
+            }
+
+            Map<String, Object> fallbackEv = new LinkedHashMap<>();
+            fallbackEv.put("task_id", ctx != null ? ctx.taskId : "");
+            fallbackEv.put("mode", "tap");
+            fallbackEv.put("digits", text.length());
+            fallbackEv.put("result", "fallback_to_keyevent");
+            trace.event("fsm_unlock_pin_input", fallbackEv);
+
             boolean allOk = true;
             for (int i = 0; i < text.length(); i++) {
                 int d = text.charAt(i) - '0';
@@ -2141,8 +2187,13 @@ public class CortexFsmEngine {
                 allOk = sendKeyClick(keycode) && allOk;
                 sleepQuiet(80);
             }
-            boolean enterOk = sendKeyClick(KEYCODE_ENTER);
-            return allOk && enterOk;
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx != null ? ctx.taskId : "");
+            ev.put("mode", "key_event");
+            ev.put("digits", text.length());
+            ev.put("result", allOk ? "ok" : "failed");
+            trace.event("fsm_unlock_pin_input", ev);
+            return allOk;
         }
 
         int[] methods = containsNonAscii(text)
@@ -2157,8 +2208,206 @@ public class CortexFsmEngine {
                 break;
             }
         }
-        boolean enterOk = sendKeyClick(KEYCODE_ENTER);
-        return inputOk && enterOk;
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("task_id", ctx != null ? ctx.taskId : "");
+        ev.put("mode", "input_text");
+        ev.put("chars", text.length());
+        ev.put("result", inputOk ? "ok" : "failed");
+        trace.event("fsm_unlock_pin_input", ev);
+        return inputOk;
+    }
+
+    private boolean tryInputUnlockPinByTap(Context ctx, String digits) {
+        if (digits == null || digits.isEmpty()) {
+            return false;
+        }
+        try {
+            byte[] payload = perception != null ? perception.handleDumpActions(new byte[0]) : null;
+            List<DumpActionsParser.ActionNode> nodes = DumpActionsParser.parse(payload);
+            if (nodes == null || nodes.isEmpty()) {
+                return false;
+            }
+
+            int bottomMax = 0;
+            for (DumpActionsParser.ActionNode n : nodes) {
+                if (n != null && n.bounds != null) {
+                    bottomMax = Math.max(bottomMax, n.bounds.bottom);
+                }
+            }
+            if (bottomMax <= 0) {
+                bottomMax = 2400;
+            }
+
+            for (int i = 0; i < digits.length(); i++) {
+                char d = digits.charAt(i);
+                DigitTapTarget target = pickDigitTapTarget(nodes, d, bottomMax);
+                if (target == null) {
+                    Map<String, Object> miss = new LinkedHashMap<>();
+                    miss.put("task_id", ctx != null ? ctx.taskId : "");
+                    miss.put("index", i);
+                    miss.put("digit", String.valueOf(d));
+                    miss.put("reason", "digit_not_found_in_dump_actions");
+                    trace.event("fsm_unlock_pin_tap_digit", miss);
+                    return false;
+                }
+                boolean tapOk = sendTap(target.x, target.y);
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx != null ? ctx.taskId : "");
+                ev.put("index", i);
+                ev.put("digit", String.valueOf(d));
+                ev.put("x", target.x);
+                ev.put("y", target.y);
+                ev.put("score", target.score);
+                ev.put("source", target.source);
+                ev.put("tap_ok", tapOk);
+                trace.event("fsm_unlock_pin_tap_digit", ev);
+                if (!tapOk) {
+                    return false;
+                }
+                sleepQuiet(100);
+            }
+            return true;
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx != null ? ctx.taskId : "");
+            ev.put("reason", "tap_mode_exception");
+            ev.put("err", String.valueOf(e));
+            trace.event("fsm_unlock_pin_tap_failed", ev);
+            return false;
+        }
+    }
+
+    private DigitTapTarget pickDigitTapTarget(List<DumpActionsParser.ActionNode> nodes, char digit, int screenBottom) {
+        if (nodes == null || nodes.isEmpty()) {
+            return null;
+        }
+        DigitTapTarget best = null;
+        for (DumpActionsParser.ActionNode n : nodes) {
+            if (n == null || n.bounds == null) {
+                continue;
+            }
+            int score = scoreDigitField(n.text, digit, "text");
+            String source = "text";
+            int descScore = scoreDigitField(n.contentDesc, digit, "desc");
+            if (descScore > score) {
+                score = descScore;
+                source = "desc";
+            }
+            int ridScore = scoreDigitField(n.resourceId, digit, "rid");
+            if (ridScore > score) {
+                score = ridScore;
+                source = "rid";
+            }
+            if (score <= 0) {
+                continue;
+            }
+
+            // Prefer clickable key-like nodes near lower screen area.
+            if ((n.type & 0x01) != 0) {
+                score += 25;
+            } else if ((n.type & 0x08) != 0) {
+                score -= 25;
+            }
+            int centerY = n.bounds.centerY();
+            if (centerY >= (screenBottom * 55) / 100) {
+                score += 18;
+            } else {
+                score -= 16;
+            }
+
+            int w = Math.max(0, n.bounds.right - n.bounds.left);
+            int h = Math.max(0, n.bounds.bottom - n.bounds.top);
+            if (w <= 0 || h <= 0) {
+                continue;
+            }
+            if (w > 1000 || h > 800) {
+                score -= 30;
+            }
+
+            if (best == null || score > best.score) {
+                best = new DigitTapTarget(n.bounds.centerX(), centerY, score, source);
+            }
+        }
+        return best;
+    }
+
+    private int scoreDigitField(String value, char digit, String source) {
+        if (value == null || value.isEmpty()) {
+            return 0;
+        }
+        String s = value.trim();
+        if (s.isEmpty()) {
+            return 0;
+        }
+        String d = String.valueOf(digit);
+
+        // Strong exact match ("1").
+        if (s.equals(d)) {
+            return 200;
+        }
+        // Typical keypad label like "1 ABC".
+        if (s.startsWith(d) && s.length() > 1) {
+            char c = s.charAt(1);
+            if (!Character.isDigit(c)) {
+                return 170;
+            }
+        }
+        // Resource-id style match: "key_1", "digit1", "btn_1".
+        if ("rid".equals(source)) {
+            String lower = s.toLowerCase(Locale.ROOT);
+            if (lower.contains("key_" + d) || lower.contains("digit" + d) || lower.endsWith("_" + d)) {
+                return 160;
+            }
+        }
+        // Loose token match.
+        if (containsTokenDigit(s, digit)) {
+            return 130;
+        }
+        return 0;
+    }
+
+    private boolean containsTokenDigit(String s, char digit) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        String d = String.valueOf(digit);
+        String normalized = s.replaceAll("[^0-9A-Za-z]+", " ").trim();
+        if (normalized.isEmpty()) {
+            return false;
+        }
+        String[] tokens = normalized.split("\\s+");
+        for (String t : tokens) {
+            if (d.equals(t)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean sendTap(int x, int y) {
+        try {
+            ByteBuffer buf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+            buf.putShort((short) x);
+            buf.putShort((short) y);
+            byte[] resp = execution != null ? execution.handleTap(buf.array()) : null;
+            return resp != null && resp.length > 0 && resp[0] == 0x01;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static class DigitTapTarget {
+        final int x;
+        final int y;
+        final int score;
+        final String source;
+
+        DigitTapTarget(int x, int y, int score, String source) {
+            this.x = x;
+            this.y = y;
+            this.score = score;
+            this.source = source != null ? source : "";
+        }
     }
 
     private boolean sendKeyClick(int keycode) {

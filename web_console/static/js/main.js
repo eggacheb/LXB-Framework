@@ -125,6 +125,9 @@ function handleCommand(cmd) {
         case 'key_recent':
             sendCommand('/api/command/key_event', { keycode: 'recent' }, 'KEY_RECENT');
             break;
+        case 'key_pin_digits':
+            sendPinDigitsByKeyEvent();
+            break;
 
         // =============================================================
         // Sense Layer
@@ -407,7 +410,7 @@ async function handleDisconnect() {
 async function sendCommand(endpoint, params, displayName) {
     if (!state.connected) {
         addLog('error', '未连接到设备');
-        return;
+        return { success: false, message: 'not_connected' };
     }
 
     addLog('command', `-> ${displayName}`);
@@ -435,13 +438,55 @@ async function sendCommand(endpoint, params, displayName) {
             state.stats.failed++;
             addLog('error', `X ${result.message}`);
         }
+        updateStats();
+        return result;
     } catch (error) {
         state.stats.failed++;
         addLog('error', `X 请求失败: ${error.message}`);
+        updateStats();
+        return { success: false, message: error.message || 'request_failed' };
+    }
+  }
+
+async function sendPinDigitsByKeyEvent() {
+    const pinEl = document.getElementById('key-pin-digits');
+    const intervalEl = document.getElementById('key-pin-interval-ms');
+    const pin = (pinEl?.value || '').trim();
+    const intervalMsRaw = parseInt(intervalEl?.value || '120', 10);
+    const intervalMs = Number.isFinite(intervalMsRaw) ? Math.max(0, intervalMsRaw) : 120;
+
+    if (!pin || !/^\d+$/.test(pin)) {
+        addLog('error', 'KEY_PIN 仅支持 0-9 数字');
+        return;
+    }
+    if (!state.connected) {
+        addLog('error', '未连接到设备');
+        return;
     }
 
-    updateStats();
-  }
+    addLog('info', `KEY_PIN start: digits=${pin.length}, interval=${intervalMs}ms`);
+    for (let i = 0; i < pin.length; i++) {
+        const d = parseInt(pin.charAt(i), 10);
+        const keycode = 7 + d; // KEYCODE_0..KEYCODE_9
+        const result = await sendCommand(
+            '/api/command/key_event',
+            { keycode, action: 2 },
+            `KEY_DIGIT ${d} (code=${keycode})`
+        );
+        if (!result || !result.success) {
+            addLog('error', `KEY_PIN aborted at index ${i}`);
+            return;
+        }
+        if (intervalMs > 0 && i < pin.length - 1) {
+            await sleepMs(intervalMs);
+        }
+    }
+    addLog('success', 'KEY_PIN done');
+}
+
+function sleepMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
   
   /**
    * 显示响应详情

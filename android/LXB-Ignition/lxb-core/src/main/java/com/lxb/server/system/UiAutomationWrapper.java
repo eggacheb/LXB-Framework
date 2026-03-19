@@ -953,6 +953,17 @@ public class UiAutomationWrapper {
                 System.err.println(TAG + " launchApp failed: cannot resolve launch activity for " + packageName);
                 return false;
             }
+
+            // Always stop before start to avoid stale task-stack state.
+            Process stopProcess = Runtime.getRuntime().exec("am force-stop " + packageName);
+            int stopExitCode = stopProcess.waitFor();
+            if (stopExitCode != 0) {
+                System.err.println(TAG + " launchApp failed: force-stop exitCode=" + stopExitCode
+                        + ", package=" + packageName);
+                return false;
+            }
+            Thread.sleep(1500);
+
             cmd.append("am start -n ").append(packageName).append("/").append(launchActivity);
             if ((flags & 0x01) != 0) {
                 cmd.append(" --activity-clear-task");
