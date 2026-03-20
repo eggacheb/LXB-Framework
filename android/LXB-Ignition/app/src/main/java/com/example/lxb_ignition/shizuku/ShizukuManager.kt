@@ -2,6 +2,7 @@ package com.example.lxb_ignition.shizuku
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
@@ -9,6 +10,7 @@ import android.util.Log
 import com.example.lxb_ignition.BuildConfig
 import com.example.lxb_ignition.IShizukuService
 import java.io.File
+import java.lang.StringBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,6 +39,7 @@ class ShizukuManager(private val context: Context) {
         private const val TAG = "ShizukuManager"
         private const val ASSET_JAR = "lxb-core-dex.jar"
         private const val TMP_JAR = "/data/local/tmp/lxb-core.jar"
+        private const val TMP_APP_LABELS = "/data/local/tmp/lxb/app_labels.tsv"
         private const val SERVER_CLASS = "com.lxb.server.Main"
         private const val PERMISSION_REQUEST_CODE = 1001
         private const val LOG_POLL_INTERVAL_MS = 2000L
@@ -272,8 +275,57 @@ class ShizukuManager(private val context: Context) {
         return listOf(
             "-Dlxb.map.dir=$mapDir",
             "-Dlxb.llm.config.path=$llmCfg",
-            "-Dlxb.task.memory.path=$taskMem"
+            "-Dlxb.task.memory.path=$taskMem",
+            "-Dlxb.app.labels.path=$TMP_APP_LABELS"
         ).joinToString(" ")
+    }
+
+    private fun buildAppLabelsTsv(): ByteArray {
+        val pm = context.packageManager
+        val labelsByPkg = linkedMapOf<String, String>()
+        val apps = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
+        for (app in apps) {
+            val pkg = app.packageName?.trim().orEmpty()
+            if (pkg.isEmpty()) continue
+            val label = sanitizeLabel(
+                runCatching { pm.getApplicationLabel(app)?.toString() ?: "" }.getOrDefault("")
+            )
+            if (label.isNotEmpty()) {
+                labelsByPkg[pkg] = label
+            }
+        }
+
+        // Fallback/enrichment path: launcher-visible apps.
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val launcherActivities = runCatching { pm.queryIntentActivities(launcherIntent, 0) }
+            .getOrDefault(emptyList())
+        for (ri in launcherActivities) {
+            val pkg = ri.activityInfo?.packageName?.trim().orEmpty()
+            if (pkg.isEmpty()) continue
+            if (labelsByPkg.containsKey(pkg)) continue
+            val label = sanitizeLabel(runCatching { ri.loadLabel(pm)?.toString() ?: "" }.getOrDefault(""))
+            if (label.isNotEmpty()) {
+                labelsByPkg[pkg] = label
+            }
+        }
+
+        log(
+            "App labels collect stats: installed=${apps.size}, launcher=${launcherActivities.size}, labeled=${labelsByPkg.size}"
+        )
+
+        val sb = StringBuilder()
+        for ((pkg, label) in labelsByPkg) {
+            sb.append(pkg).append('\t').append(label).append('\n')
+        }
+        return sb.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    private fun sanitizeLabel(raw: String): String {
+        return raw
+            .replace('\t', ' ')
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .trim()
     }
 
     // ----- lxb-core server management -----
@@ -295,6 +347,15 @@ class ShizukuManager(private val context: Context) {
                 return@withContext Result.failure(Exception(msg))
             }
             log("JAR written to $TMP_JAR")
+
+            // Sync app labels snapshot (APK PackageManager -> shell-readable file).
+            runCatching {
+                val labelsBytes = buildAppLabelsTsv()
+                val labelsOk = svc.deployJar(labelsBytes, TMP_APP_LABELS)
+                log("App labels snapshot: ${if (labelsOk) "OK" else "FAIL"} (${labelsBytes.size} bytes) -> $TMP_APP_LABELS")
+            }.onFailure { e ->
+                log("App labels snapshot failed: ${e.message}")
+            }
 
             setState(State.STARTING, "Starting lxb-core (TCP :$port)...")
             val jvmOpts = buildServerJvmOpts()

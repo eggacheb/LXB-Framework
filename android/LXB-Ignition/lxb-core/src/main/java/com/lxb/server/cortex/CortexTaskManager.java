@@ -482,6 +482,10 @@ public class CortexTaskManager {
                     if (pkg != null) {
                         instance.packageName = String.valueOf(pkg);
                     }
+                    Object pkgLabel = out.get("package_label");
+                    if (pkgLabel != null) {
+                        instance.packageLabel = String.valueOf(pkgLabel);
+                    }
                     Object target = out.get("target_page");
                     if (target != null) {
                         instance.targetPage = String.valueOf(target);
@@ -596,6 +600,7 @@ public class CortexTaskManager {
         String finalState;       // FSM final state name, e.g. FINISH/FAIL
         String reason;           // Error or explanation, if any
         String packageName;
+        String packageLabel;
         String targetPage;
         String source;           // manual | schedule
         String scheduleId;       // nullable
@@ -637,6 +642,7 @@ public class CortexTaskManager {
         out.put("final_state", inst.finalState);
         out.put("reason", inst.reason);
         out.put("package_name", inst.packageName);
+        out.put("package_label", inst.packageLabel);
         out.put("target_page", inst.targetPage);
         out.put("source", inst.source);
         out.put("schedule_id", inst.scheduleId);
@@ -677,6 +683,7 @@ public class CortexTaskManager {
             row.put("final_state", inst.finalState);
             row.put("reason", inst.reason);
             row.put("package_name", inst.packageName);
+            row.put("package_label", inst.packageLabel);
             row.put("target_page", inst.targetPage);
             row.put("source", inst.source);
             row.put("schedule_id", inst.scheduleId);
@@ -725,6 +732,7 @@ public class CortexTaskManager {
             snapshot.put("task_id", instance.taskId);
             snapshot.put("user_task", req.userTask != null ? req.userTask : "");
             snapshot.put("package_name", stringOrEmpty(out.get("package_name")));
+            snapshot.put("package_label", stringOrEmpty(out.get("package_label")));
             snapshot.put("target_page", stringOrEmpty(out.get("target_page")));
             snapshot.put("route_trace", copyList(out.get("route_trace"), 32));
             snapshot.put("command_log", copyList(out.get("command_log"), 64));
@@ -753,12 +761,14 @@ public class CortexTaskManager {
 
     private static String deriveSummaryText(Map<String, Object> snapshot) {
         String pkg = stringOrEmpty(snapshot.get("package_name"));
+        String label = stringOrEmpty(snapshot.get("package_label"));
+        String app = !label.isEmpty() ? label : pkg;
         String page = stringOrEmpty(snapshot.get("target_page"));
-        if (!pkg.isEmpty() && !page.isEmpty()) {
-            return "Last successful route reached " + page + " in " + pkg + ".";
+        if (!app.isEmpty() && !page.isEmpty()) {
+            return "Last successful route reached " + page + " in " + app + ".";
         }
-        if (!pkg.isEmpty()) {
-            return "Last successful task ran in package " + pkg + ".";
+        if (!app.isEmpty()) {
+            return "Last successful task ran in " + app + ".";
         }
         return "Last successful task memory available.";
     }
@@ -995,6 +1005,7 @@ public class CortexTaskManager {
         row.put("final_state", inst.finalState);
         row.put("reason", inst.reason);
         row.put("package_name", inst.packageName);
+        row.put("package_label", inst.packageLabel);
         row.put("target_page", inst.targetPage);
         row.put("source", inst.source);
         row.put("schedule_id", inst.scheduleId);
@@ -1016,6 +1027,7 @@ public class CortexTaskManager {
             inst.finalState = stringOrEmpty(row.get("final_state"));
             inst.reason = stringOrEmpty(row.get("reason"));
             inst.packageName = stringOrEmpty(row.get("package_name"));
+            inst.packageLabel = stringOrEmpty(row.get("package_label"));
             inst.targetPage = stringOrEmpty(row.get("target_page"));
             inst.source = stringOrEmpty(row.get("source"));
             inst.scheduleId = stringOrEmpty(row.get("schedule_id"));
