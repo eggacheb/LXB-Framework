@@ -135,6 +135,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state: String,
         val finalState: String,
         val reason: String,
+        val taskSummary: String,
         val packageName: String,
         val targetPage: String,
         val source: String,
@@ -433,6 +434,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             state = t.optString("state", ""),
                             finalState = t.optString("final_state", ""),
                             reason = t.optString("reason", ""),
+                            taskSummary = t.optString("task_summary", ""),
                             packageName = t.optString("package_name", ""),
                             targetPage = t.optString("target_page", ""),
                             source = t.optString("source", ""),
@@ -738,38 +740,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         schedulePackage.value = ""
         scheduleStartPage.value = ""
         schedulePlaybook.value = ""
-    }
-
-    fun showTaskSummaryInChat(task: TaskSummary) {
-        val text = buildString {
-            append("Task summary:\n")
-            append("id=").append(task.taskId).append("\n")
-            if (task.userTask.isNotEmpty()) {
-                append("task=").append(task.userTask).append("\n")
-            }
-            append("state=").append(task.state)
-            if (task.finalState.isNotEmpty()) {
-                append(" (final=").append(task.finalState).append(")")
-            }
-            if (task.reason.isNotEmpty()) {
-                append(", reason=").append(task.reason)
-            }
-            append("\n")
-            if (task.packageName.isNotEmpty()) {
-                append("package=").append(task.packageName).append("\n")
-            }
-            if (task.targetPage.isNotEmpty()) {
-                append("target_page=").append(task.targetPage).append("\n")
-            }
-            if (task.source.isNotEmpty()) {
-                append("source=").append(task.source).append("\n")
-            }
-            if (task.scheduleId.isNotEmpty()) {
-                append("schedule_id=").append(task.scheduleId).append("\n")
-            }
-            append("memory_applied=").append(task.memoryApplied).append("\n")
-        }
-        appendSystemMessage(text.trim())
     }
 
     /**

@@ -317,6 +317,7 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val schedulePlaybook by viewModel.schedulePlaybook.collectAsState()
     var page by rememberSaveable { mutableIntStateOf(0) }
     var editingScheduleId by rememberSaveable { mutableStateOf("") }
+    var selectedTask by remember { mutableStateOf<MainViewModel.TaskSummary?>(null) }
 
     LaunchedEffect(Unit) {
         viewModel.refreshScheduleListOnDevice()
@@ -538,7 +539,7 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             items(tasks, key = { it.taskId }) { task ->
-                                TaskRow(task = task, onClick = { viewModel.showTaskSummaryInChat(task) })
+                                TaskRow(task = task, onClick = { selectedTask = task })
                             }
                         }
                     }
@@ -783,6 +784,65 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 )
             }
         }
+    }
+
+    val detail = selectedTask
+    if (detail != null) {
+        AlertDialog(
+            onDismissRequest = { selectedTask = null },
+            title = { Text("Task Details") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (detail.taskSummary.isNotBlank()) {
+                        Text(
+                            text = detail.taskSummary,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        Text(
+                            text = "No task summary available yet.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Text("id=${detail.taskId}", fontSize = 11.sp)
+                    Text(
+                        text = "state=${detail.state}" +
+                                if (detail.finalState.isNotBlank()) " / ${detail.finalState}" else "",
+                        fontSize = 11.sp
+                    )
+                    if (detail.reason.isNotBlank()) {
+                        Text("reason=${detail.reason}", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (detail.userTask.isNotBlank()) {
+                        Text("task=${detail.userTask}", fontSize = 11.sp)
+                    }
+                    if (detail.packageName.isNotBlank()) {
+                        Text("package=${detail.packageName}", fontSize = 11.sp)
+                    }
+                    if (detail.targetPage.isNotBlank()) {
+                        Text("target_page=${detail.targetPage}", fontSize = 11.sp)
+                    }
+                    if (detail.source.isNotBlank()) {
+                        Text("source=${detail.source}", fontSize = 11.sp)
+                    }
+                    if (detail.scheduleId.isNotBlank()) {
+                        Text("schedule_id=${detail.scheduleId}", fontSize = 11.sp)
+                    }
+                    Text("memory_applied=${detail.memoryApplied}", fontSize = 11.sp)
+                    if (detail.createdAt > 0L) {
+                        Text("created_at=${formatTsFull(detail.createdAt)}", fontSize = 11.sp)
+                    }
+                    if (detail.finishedAt > 0L) {
+                        Text("finished_at=${formatTsFull(detail.finishedAt)}", fontSize = 11.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                OutlinedButton(onClick = { selectedTask = null }) {
+                    Text(tr("Close"))
+                }
+            }
+        )
     }
 }
 
@@ -1302,9 +1362,11 @@ fun ConfigOverviewPage(
     onOpenMapSync: () -> Unit
 ) {
     val uiLang by viewModel.uiLang.collectAsState()
+    val scrollState = rememberScrollState()
     Column(
         modifier = modifier
             .fillMaxSize()
+            .verticalScroll(scrollState)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {

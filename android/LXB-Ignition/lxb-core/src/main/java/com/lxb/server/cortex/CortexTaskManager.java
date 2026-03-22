@@ -490,6 +490,7 @@ public class CortexTaskManager {
                     if (target != null) {
                         instance.targetPage = String.valueOf(target);
                     }
+                    instance.taskSummary = extractTaskSummary(out);
                     instance.resultSummary = out;
                     if (instance.state == TaskState.COMPLETED) {
                         saveTaskMemoryFromSuccess(req, instance, out);
@@ -607,6 +608,7 @@ public class CortexTaskManager {
         String userPlaybook;     // optional guidance text
         String taskMemoryKey;    // normalized key
         boolean memoryApplied;   // whether this run consumed memory hint
+        String taskSummary;      // final DONE summary for user-facing result
         Map<String, Object> resultSummary;
     }
 
@@ -648,6 +650,7 @@ public class CortexTaskManager {
         out.put("schedule_id", inst.scheduleId);
         out.put("task_memory_key", inst.taskMemoryKey);
         out.put("memory_applied", inst.memoryApplied);
+        out.put("task_summary", inst.taskSummary);
         if (inst.resultSummary != null) {
             out.put("summary", inst.resultSummary);
         }
@@ -689,9 +692,40 @@ public class CortexTaskManager {
             row.put("schedule_id", inst.scheduleId);
             row.put("task_memory_key", inst.taskMemoryKey);
             row.put("memory_applied", inst.memoryApplied);
+            row.put("task_summary", inst.taskSummary);
             result.add(row);
         }
         return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String extractTaskSummary(Map<String, Object> out) {
+        if (out == null || out.isEmpty()) {
+            return "";
+        }
+        Object outputObj = out.get("output");
+        if (outputObj instanceof Map) {
+            Map<String, Object> output = (Map<String, Object>) outputObj;
+            String taskSummary = stringOrEmpty(output.get("task_summary"));
+            if (!taskSummary.isEmpty()) {
+                return taskSummary;
+            }
+            Object subTaskObj = output.get("sub_task_summaries");
+            if (subTaskObj instanceof Map) {
+                Map<String, Object> subs = (Map<String, Object>) subTaskObj;
+                String last = "";
+                for (Object v : subs.values()) {
+                    String s = stringOrEmpty(v);
+                    if (!s.isEmpty()) {
+                        last = s;
+                    }
+                }
+                if (!last.isEmpty()) {
+                    return last;
+                }
+            }
+        }
+        return "";
     }
 
     private static String buildTaskMemoryKey(String userTask) {
@@ -1012,6 +1046,7 @@ public class CortexTaskManager {
         row.put("user_playbook", inst.userPlaybook);
         row.put("task_memory_key", inst.taskMemoryKey);
         row.put("memory_applied", inst.memoryApplied);
+        row.put("task_summary", inst.taskSummary);
         return row;
     }
 
@@ -1034,6 +1069,7 @@ public class CortexTaskManager {
             inst.userPlaybook = stringOrEmpty(row.get("user_playbook"));
             inst.taskMemoryKey = stringOrEmpty(row.get("task_memory_key"));
             inst.memoryApplied = toBool(row.get("memory_applied"), false);
+            inst.taskSummary = stringOrEmpty(row.get("task_summary"));
             return inst;
         } catch (Exception ignored) {
             return null;

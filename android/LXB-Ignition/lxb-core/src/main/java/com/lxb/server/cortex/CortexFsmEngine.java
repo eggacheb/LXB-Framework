@@ -100,6 +100,7 @@ public class CortexFsmEngine {
         // Current sub_task runtime context
         public SubTask currentSubTask = null;
         public int currentSubTaskIndex = -1;
+        public boolean currentSubTaskIsLast = false;
 
         // External semantic history (maintained by host, not by model memory).
         // Each row contains: instruction, expected, actual, judgement, carry_context.
@@ -322,6 +323,7 @@ public class CortexFsmEngine {
                 ctx.selectedPackageLabel = "";
                 ctx.currentSubTask = st;
                 ctx.currentSubTaskIndex = idx;
+                ctx.currentSubTaskIsLast = (idx == effectiveSubTasks.size() - 1);
                 ctx.visionHistory.clear();
                 ctx.pendingHistoryInstruction = "";
                 ctx.pendingHistoryExpected = "";
@@ -428,6 +430,7 @@ public class CortexFsmEngine {
             State finalState = overallSuccess ? State.FINISH : State.FAIL;
             ctx.currentSubTask = null;
             ctx.currentSubTaskIndex = -1;
+            ctx.currentSubTaskIsLast = false;
             tryAutoLockAfterTask(ctx, finalState);
 
             Map<String, Object> out = new LinkedHashMap<>();
@@ -737,11 +740,70 @@ public class CortexFsmEngine {
         }
         summaries.put(key, s);
 
+        // Wire current sub_task outputs to blackboard so later sub_tasks can
+        // request them explicitly via inputs.
+        List<String> outputKeys = new ArrayList<>();
+        if (ctx.currentSubTask != null && ctx.currentSubTask.outputs != null) {
+            for (String raw : ctx.currentSubTask.outputs) {
+                String outKey = raw != null ? raw.trim() : "";
+                if (outKey.isEmpty()) {
+                    continue;
+                }
+                ctx.blackboard.put(outKey, s);
+                outputKeys.add(outKey);
+            }
+        }
+        if (!outputKeys.isEmpty()) {
+            Object outObj = ctx.output.get("sub_task_outputs");
+            Map<String, Object> outputMap;
+            if (outObj instanceof Map) {
+                outputMap = (Map<String, Object>) outObj;
+            } else {
+                outputMap = new LinkedHashMap<>();
+                ctx.output.put("sub_task_outputs", outputMap);
+            }
+            for (String outKey : outputKeys) {
+                outputMap.put(outKey, s);
+            }
+        }
+
         Map<String, Object> ev = new LinkedHashMap<>();
         ev.put("task_id", ctx.taskId);
         ev.put("sub_task_key", key);
         ev.put("summary", s);
+        if (!outputKeys.isEmpty()) {
+            ev.put("output_keys", new ArrayList<>(outputKeys));
+        }
         trace.event("fsm_sub_task_summary", ev);
+    }
+
+    private Map<String, String> collectPassedContextForCurrentSubTask(Context ctx) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (ctx == null || ctx.currentSubTask == null || ctx.currentSubTask.inputs == null) {
+            return out;
+        }
+        if (ctx.currentSubTask.inputs.isEmpty() || ctx.blackboard.isEmpty()) {
+            return out;
+        }
+        for (String raw : ctx.currentSubTask.inputs) {
+            String key = raw != null ? raw.trim() : "";
+            if (key.isEmpty()) {
+                continue;
+            }
+            String val = stringOrEmpty(ctx.blackboard.get(key));
+            if (val.isEmpty()) {
+                for (Map.Entry<String, Object> e : ctx.blackboard.entrySet()) {
+                    if (key.equalsIgnoreCase(stringOrEmpty(e.getKey()))) {
+                        val = stringOrEmpty(e.getValue());
+                        break;
+                    }
+                }
+            }
+            if (!val.isEmpty()) {
+                out.put(key, val);
+            }
+        }
+        return out;
     }
 
     /**
@@ -3430,7 +3492,22 @@ public class CortexFsmEngine {
                     if (doneSummary.isEmpty()) {
                         doneSummary = !observeResult.isEmpty() ? observeResult : "";
                     }
+                    if (doneSummary.isEmpty()) {
+                        String objective = "";
+                        if (ctx.currentSubTask != null) {
+                            objective = stringOrEmpty(ctx.currentSubTask.description);
+                        }
+                        if (objective.isEmpty()) {
+                            objective = stringOrEmpty(ctx.userTask);
+                        }
+                        doneSummary = objective.isEmpty()
+                                ? "Sub-task completed."
+                                : ("Sub-task completed: " + objective);
+                    }
                     storeSubTaskSummary(ctx, doneSummary);
+                    if (ctx.currentSubTaskIsLast) {
+                        ctx.output.put("task_summary", doneSummary);
+                    }
                     return State.FINISH;
                 }
                 if ("FAIL".equals(cmd.op)) {
@@ -4229,25 +4306,33 @@ public class CortexFsmEngine {
         sb.append("- Example B: entered settings-like page and expected section not on screen -> SWIPE to continue searching, then decide BACK only if still absent.\n\n");
 
         sb.append("[PASSED_CONTEXT_BLOCK]\n");
-        if (ctx.blackboard.isEmpty()) {
+        List<String> requiredInputs = new ArrayList<>();
+        if (ctx.currentSubTask != null && ctx.currentSubTask.inputs != null) {
+            for (String raw : ctx.currentSubTask.inputs) {
+                String key = raw != null ? raw.trim() : "";
+                if (!key.isEmpty()) {
+                    requiredInputs.add(key);
+                }
+            }
+        }
+        Map<String, String> passedContext = collectPassedContextForCurrentSubTask(ctx);
+        if (requiredInputs.isEmpty()) {
+            sb.append("Information from previous sub-tasks:\n- none (no input dependencies for this sub-task)\n");
+        } else if (passedContext.isEmpty()) {
             sb.append("Information from previous sub-tasks:\n- none\n");
+            sb.append("Requested input keys (currently unavailable):\n");
+            for (String key : requiredInputs) {
+                sb.append("- ").append(key).append("\n");
+            }
         } else {
             sb.append("Information from previous sub-tasks:\n");
-            int n = 0;
-            for (Map.Entry<String, Object> e : ctx.blackboard.entrySet()) {
-                if (n >= 8) break;
-                String val = stringOrEmpty(e.getValue());
-                if (val.isEmpty()) continue;
-                sb.append("- ").append(val).append("\n");
-                n++;
-            }
-            if (n == 0) {
-                sb.append("- none\n");
+            for (Map.Entry<String, String> e : passedContext.entrySet()) {
+                sb.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append("\n");
             }
         }
         sb.append("Usage guidance:\n");
-        sb.append("- Use relevant items when useful for this objective.\n");
-        sb.append("- Ignore irrelevant items safely.\n\n");
+        sb.append("- Use only items listed above when they are relevant to current objective.\n");
+        sb.append("- Do not invent missing input values.\n\n");
 
         sb.append("[GUIDANCE_BLOCK]\n");
         if (!ctx.userPlaybook.isEmpty()) {
