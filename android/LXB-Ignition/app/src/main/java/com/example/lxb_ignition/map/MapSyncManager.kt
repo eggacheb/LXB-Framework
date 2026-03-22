@@ -65,11 +65,14 @@ class MapSyncManager(
     fun syncLaneIndex(rawBaseUrl: String, laneRaw: String): Result<SyncIndexResult> = runCatching {
         val lane = normalizeLane(laneRaw)
         val base = normalizeRawBaseUrl(rawBaseUrl)
-        val indexUrl = "$base/$lane/index.json"
+        val indexUrl = "$base/manifests/$lane/latest.json"
         val body = httpGetBytes(indexUrl)
         val text = body.toString(StandardCharsets.UTF_8)
         val obj = JSONObject(text)
         val arr = when {
+            // New manifest format.
+            obj.has("items") && obj.opt("items") is JSONArray -> obj.optJSONArray("items")
+            // Backward-compat fallback: old index formats.
             obj.has("maps") && obj.opt("maps") is JSONArray -> obj.optJSONArray("maps")
             obj.has("candidates") && obj.opt("candidates") is JSONArray -> obj.optJSONArray("candidates")
             else -> JSONArray()

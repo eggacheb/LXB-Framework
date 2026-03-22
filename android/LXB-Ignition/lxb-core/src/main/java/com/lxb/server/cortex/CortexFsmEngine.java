@@ -153,6 +153,14 @@ public class CortexFsmEngine {
     private static final long UNLOCK_STABLE_TIMEOUT_MS = 3000L;
     private static final long UNLOCK_STABLE_SAMPLE_MS = 300L;
     private static final int UNLOCK_STABLE_REQUIRED_HITS = 2;
+    private static final long ROUTING_FIRST_STEP_WINDOW_MS = 10000L;
+    private static final long ROUTING_FIRST_STEP_SAMPLE_MS = 350L;
+    private static final long ROUTING_FIRST_STEP_AFTER_SKIP_SLEEP_MS = 300L;
+    private static final int ROUTING_FIRST_STEP_SKIP_MIN_SCORE = 120;
+    private static final int ROUTING_STEP_RESOLVE_RETRY_MAX = 3;
+    private static final long ROUTING_STEP_RESOLVE_RETRY_SLEEP_MS = 300L;
+    private static final int ROUTING_RECOVERY_MAX = 2;
+    private static final long ROUTING_RECOVERY_POST_ACTION_SLEEP_MS = 300L;
     private static final int KEYCODE_HOME = 3;
     private static final int KEYCODE_POWER = 26;
 
@@ -1663,80 +1671,45 @@ public class CortexFsmEngine {
         LocatorResolver resolver = new LocatorResolver(perception, trace);
         List<Map<String, Object>> stepSummaries = new ArrayList<>();
         boolean allOk = true;
+        boolean degradedToVision = false;
         int index = 0;
+        int recoveryAttempts = 0;
 
-        for (RouteMap.Transition t : path) {
-            Map<String, Object> stepEv = new LinkedHashMap<>();
-            stepEv.put("task_id", ctx.taskId);
-            stepEv.put("package", pkg);
-            stepEv.put("from_page", t.fromPage);
-            stepEv.put("to_page", t.toPage);
-            stepEv.put("index", index);
-            stepEv.put("description", t.description);
-            trace.event("fsm_routing_step_start", stepEv);
+        while (index < path.size()) {
+            RouteMap.Transition t = path.get(index);
+            RouteStepExec stepExec = (index == 0)
+                    ? executeFirstRoutingStepWithWindow(ctx, pkg, t, resolver, index)
+                    : executeRegularRoutingStep(ctx, pkg, t, resolver, index);
+            stepSummaries.add(stepExec.step);
 
-            Map<String, Object> step = new LinkedHashMap<>();
-            step.put("index", index);
-            step.put("from", t.fromPage);
-            step.put("to", t.toPage);
-            step.put("description", t.description);
+            if (stepExec.ok) {
+                index += 1;
+                sleepQuiet(400);
+                continue;
+            }
 
-            String result = "ok";
-            String reason = "";
-            String pickedStage = "";
-            List<Object> pickedBounds = null;
-
-            try {
-                Locator locator = t.action != null ? t.action.locator : null;
-                if (locator == null) {
-                    result = "resolve_fail";
-                    reason = "missing_locator";
-                    allOk = false;
-                } else {
-                    ResolvedNode node = resolver.resolve(locator);
-                    pickedStage = node.pickedStage;
-                    pickedBounds = node.bounds.toList();
-
-                    int cx = (node.bounds.left + node.bounds.right) / 2;
-                    int cy = (node.bounds.top + node.bounds.bottom) / 2;
-
-                    ByteBuffer tapPayload = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
-                    tapPayload.putShort((short) cx);
-                    tapPayload.putShort((short) cy);
-                    byte[] resp = execution.handleTap(tapPayload.array());
-
-                    step.put("tap_resp_len", resp != null ? resp.length : 0);
+            if (recoveryAttempts < ROUTING_RECOVERY_MAX) {
+                String failReason = stringOrEmpty(stepExec.step.get("reason"));
+                boolean recovered = tryRoutePopupRecoveryByVision(ctx, pkg, index, t, failReason);
+                Map<String, Object> recEv = new LinkedHashMap<>();
+                recEv.put("task_id", ctx.taskId);
+                recEv.put("package", pkg);
+                recEv.put("index", index);
+                recEv.put("attempt", recoveryAttempts + 1);
+                recEv.put("max_attempts", ROUTING_RECOVERY_MAX);
+                recEv.put("recovered", recovered);
+                recEv.put("reason", failReason);
+                trace.event("fsm_routing_recovery_result", recEv);
+                if (recovered) {
+                    recoveryAttempts += 1;
+                    sleepQuiet(ROUTING_RECOVERY_POST_ACTION_SLEEP_MS);
+                    continue;
                 }
-            } catch (Exception e) {
-                allOk = false;
-                String msg = String.valueOf(e);
-                if (result.startsWith("resolve")) {
-                    result = "resolve_fail";
-                } else {
-                    result = "tap_fail";
-                }
-                reason = msg;
             }
 
-            step.put("picked_stage", pickedStage);
-            if (pickedBounds != null) {
-                step.put("picked_bounds", pickedBounds);
-            }
-            step.put("result", result);
-            step.put("reason", reason);
-
-            trace.event("fsm_routing_step_end", step);
-            stepSummaries.add(step);
-
-            if (!"ok".equals(result)) {
-                break;
-            }
-            index++;
-
-            try {
-                Thread.sleep(400);
-            } catch (InterruptedException ignored) {
-            }
+            allOk = false;
+            degradedToVision = true;
+            break;
         }
 
         // 4) Populate context route_result and route_trace.
@@ -1757,7 +1730,7 @@ public class CortexFsmEngine {
         ctx.routeResult.put("to_page", toPage);
         ctx.routeResult.put("steps", stepSummaries);
         if (!allOk) {
-            ctx.routeResult.put("reason", "step_failed");
+            ctx.routeResult.put("reason", degradedToVision ? "step_failed_degraded_to_vision" : "step_failed");
         }
 
         Map<String, Object> done = new LinkedHashMap<>();
@@ -1767,9 +1740,19 @@ public class CortexFsmEngine {
         done.put("to_page", toPage);
         done.put("ok", allOk);
         done.put("steps", stepSummaries.size());
+        done.put("degraded_to_vision", degradedToVision);
         trace.event("fsm_routing_done", done);
 
         if (!allOk) {
+            if (degradedToVision) {
+                Map<String, Object> deg = new LinkedHashMap<>();
+                deg.put("task_id", ctx.taskId);
+                deg.put("package", pkg);
+                deg.put("failed_index", index);
+                deg.put("reason", "routing_step_failed_degraded_to_vision");
+                trace.event("fsm_routing_degraded_to_vision", deg);
+                return State.VISION_ACT;
+            }
             ctx.error = "routing_step_failed";
             return State.FAIL;
         }
@@ -1866,6 +1849,426 @@ public class CortexFsmEngine {
             ev.put("package", packageName);
             ev.put("err", String.valueOf(e));
             trace.event("fsm_routing_launch_err", ev);
+            return false;
+        }
+    }
+
+    private RouteStepExec executeFirstRoutingStepWithWindow(
+            Context ctx,
+            String pkg,
+            RouteMap.Transition t,
+            LocatorResolver resolver,
+            int index
+    ) {
+        Map<String, Object> stepEv = new LinkedHashMap<>();
+        stepEv.put("task_id", ctx.taskId);
+        stepEv.put("package", pkg);
+        stepEv.put("from_page", t.fromPage);
+        stepEv.put("to_page", t.toPage);
+        stepEv.put("index", index);
+        stepEv.put("description", t.description);
+        stepEv.put("window_ms", ROUTING_FIRST_STEP_WINDOW_MS);
+        trace.event("fsm_routing_step_start", stepEv);
+
+        Map<String, Object> step = new LinkedHashMap<>();
+        step.put("index", index);
+        step.put("from", t.fromPage);
+        step.put("to", t.toPage);
+        step.put("description", t.description);
+        step.put("first_step_window_ms", ROUTING_FIRST_STEP_WINDOW_MS);
+
+        Locator locator = t.action != null ? t.action.locator : null;
+        if (locator == null) {
+            step.put("result", "resolve_fail");
+            step.put("reason", "missing_locator");
+            trace.event("fsm_routing_step_end", step);
+            return new RouteStepExec(step, false);
+        }
+
+        long deadline = System.currentTimeMillis() + ROUTING_FIRST_STEP_WINDOW_MS;
+        int probes = 0;
+        String lastResolveErr = "";
+
+        while (System.currentTimeMillis() <= deadline) {
+            probes += 1;
+
+            try {
+                ResolvedNode node = resolver.resolve(locator);
+                int cx = (node.bounds.left + node.bounds.right) / 2;
+                int cy = (node.bounds.top + node.bounds.bottom) / 2;
+
+                ByteBuffer tapPayload = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+                tapPayload.putShort((short) cx);
+                tapPayload.putShort((short) cy);
+                byte[] resp = execution.handleTap(tapPayload.array());
+
+                step.put("picked_stage", node.pickedStage);
+                step.put("picked_bounds", node.bounds.toList());
+                step.put("tap_resp_len", resp != null ? resp.length : 0);
+                step.put("window_probe_count", probes);
+                step.put("result", "ok");
+                step.put("reason", "first_step_window_route_hit");
+
+                Map<String, Object> hitEv = new LinkedHashMap<>();
+                hitEv.put("task_id", ctx.taskId);
+                hitEv.put("package", pkg);
+                hitEv.put("index", index);
+                hitEv.put("probe", probes);
+                hitEv.put("x", cx);
+                hitEv.put("y", cy);
+                hitEv.put("picked_stage", node.pickedStage);
+                trace.event("fsm_routing_first_step_route_hit", hitEv);
+
+                trace.event("fsm_routing_step_end", step);
+                return new RouteStepExec(step, true);
+            } catch (Exception e) {
+                lastResolveErr = String.valueOf(e);
+            }
+
+            boolean skipTapped = tryTapRoutingSkipCandidate(ctx, pkg, index, probes);
+            if (skipTapped) {
+                sleepQuiet(ROUTING_FIRST_STEP_AFTER_SKIP_SLEEP_MS);
+            }
+            sleepQuiet(ROUTING_FIRST_STEP_SAMPLE_MS);
+        }
+
+        step.put("window_probe_count", probes);
+        step.put("result", "resolve_fail");
+        step.put("reason", lastResolveErr.isEmpty()
+                ? "first_step_window_timeout"
+                : ("first_step_window_timeout:" + lastResolveErr));
+        trace.event("fsm_routing_step_end", step);
+        return new RouteStepExec(step, false);
+    }
+
+    private RouteStepExec executeRegularRoutingStep(
+            Context ctx,
+            String pkg,
+            RouteMap.Transition t,
+            LocatorResolver resolver,
+            int index
+    ) {
+        Map<String, Object> stepEv = new LinkedHashMap<>();
+        stepEv.put("task_id", ctx.taskId);
+        stepEv.put("package", pkg);
+        stepEv.put("from_page", t.fromPage);
+        stepEv.put("to_page", t.toPage);
+        stepEv.put("index", index);
+        stepEv.put("description", t.description);
+        trace.event("fsm_routing_step_start", stepEv);
+
+        Map<String, Object> step = new LinkedHashMap<>();
+        step.put("index", index);
+        step.put("from", t.fromPage);
+        step.put("to", t.toPage);
+        step.put("description", t.description);
+
+        String result = "ok";
+        String reason = "";
+        String pickedStage = "";
+        List<Object> pickedBounds = null;
+
+        try {
+            Locator locator = t.action != null ? t.action.locator : null;
+            if (locator == null) {
+                result = "resolve_fail";
+                reason = "missing_locator";
+            } else {
+                ResolvedNode node = null;
+                String lastResolveErr = "";
+                int resolveAttempts = 0;
+                for (int resolveAttempt = 1; resolveAttempt <= ROUTING_STEP_RESOLVE_RETRY_MAX; resolveAttempt++) {
+                    resolveAttempts = resolveAttempt;
+                    try {
+                        node = resolver.resolve(locator);
+                        if (resolveAttempt > 1) {
+                            Map<String, Object> okRetryEv = new LinkedHashMap<>();
+                            okRetryEv.put("task_id", ctx.taskId);
+                            okRetryEv.put("package", pkg);
+                            okRetryEv.put("index", index);
+                            okRetryEv.put("attempt", resolveAttempt);
+                            okRetryEv.put("result", "recovered");
+                            trace.event("fsm_routing_step_resolve_retry", okRetryEv);
+                        }
+                        break;
+                    } catch (Exception re) {
+                        lastResolveErr = String.valueOf(re);
+                        Map<String, Object> retryEv = new LinkedHashMap<>();
+                        retryEv.put("task_id", ctx.taskId);
+                        retryEv.put("package", pkg);
+                        retryEv.put("index", index);
+                        retryEv.put("attempt", resolveAttempt);
+                        retryEv.put("max_attempts", ROUTING_STEP_RESOLVE_RETRY_MAX);
+                        retryEv.put("reason", lastResolveErr);
+                        retryEv.put("retrying", resolveAttempt < ROUTING_STEP_RESOLVE_RETRY_MAX);
+                        trace.event("fsm_routing_step_resolve_retry", retryEv);
+                        if (resolveAttempt < ROUTING_STEP_RESOLVE_RETRY_MAX) {
+                            sleepQuiet(ROUTING_STEP_RESOLVE_RETRY_SLEEP_MS);
+                        }
+                    }
+                }
+
+                step.put("resolve_attempts", resolveAttempts);
+                if (node == null) {
+                    result = "resolve_fail";
+                    reason = lastResolveErr.isEmpty() ? "resolve_failed_after_retries" : lastResolveErr;
+                } else {
+                    pickedStage = node.pickedStage;
+                    pickedBounds = node.bounds.toList();
+
+                    int cx = (node.bounds.left + node.bounds.right) / 2;
+                    int cy = (node.bounds.top + node.bounds.bottom) / 2;
+
+                    ByteBuffer tapPayload = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+                    tapPayload.putShort((short) cx);
+                    tapPayload.putShort((short) cy);
+                    byte[] resp = execution.handleTap(tapPayload.array());
+
+                    step.put("tap_resp_len", resp != null ? resp.length : 0);
+                }
+            }
+        } catch (Exception e) {
+            String msg = String.valueOf(e);
+            if (result.startsWith("resolve")) {
+                result = "resolve_fail";
+            } else {
+                result = "tap_fail";
+            }
+            reason = msg;
+        }
+
+        step.put("picked_stage", pickedStage);
+        if (pickedBounds != null) {
+            step.put("picked_bounds", pickedBounds);
+        }
+        step.put("result", result);
+        step.put("reason", reason);
+
+        trace.event("fsm_routing_step_end", step);
+        return new RouteStepExec(step, "ok".equals(result));
+    }
+
+    private boolean tryRoutePopupRecoveryByVision(
+            Context ctx,
+            String pkg,
+            int failedIndex,
+            RouteMap.Transition failedTransition,
+            String failReason
+    ) {
+        try {
+            Map<String, Object> begin = new LinkedHashMap<>();
+            begin.put("task_id", ctx.taskId);
+            begin.put("package", pkg);
+            begin.put("failed_index", failedIndex);
+            begin.put("from_page", failedTransition != null ? failedTransition.fromPage : "");
+            begin.put("to_page", failedTransition != null ? failedTransition.toPage : "");
+            begin.put("reason", failReason);
+            trace.event("fsm_routing_recovery_begin", begin);
+
+            byte[] shotResp = perception != null ? perception.handleScreenshot() : null;
+            byte[] screenshotPng = null;
+            if (shotResp != null && shotResp.length > 1 && shotResp[0] != 0x00) {
+                screenshotPng = Arrays.copyOfRange(shotResp, 1, shotResp.length);
+            }
+            if (screenshotPng == null || screenshotPng.length == 0) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx.taskId);
+                ev.put("reason", "screenshot_unavailable");
+                trace.event("fsm_routing_recovery_skip", ev);
+                return false;
+            }
+
+            LlmConfig cfg = LlmConfig.loadDefault();
+            String prompt = buildRoutingRecoveryPrompt(ctx, pkg, failedIndex, failedTransition, failReason);
+            Map<String, Object> promptEv = new LinkedHashMap<>();
+            promptEv.put("task_id", ctx.taskId);
+            promptEv.put("failed_index", failedIndex);
+            promptEv.put("prompt", prompt);
+            trace.event("llm_prompt_routing_recovery", promptEv);
+
+            String raw = llmClient.chatOnce(cfg, null, prompt, screenshotPng);
+            Map<String, Object> respEv = new LinkedHashMap<>();
+            respEv.put("task_id", ctx.taskId);
+            respEv.put("failed_index", failedIndex);
+            respEv.put("response", raw != null && raw.length() > 2000 ? raw.substring(0, 2000) + "..." : raw);
+            trace.event("llm_response_routing_recovery", respEv);
+
+            String normalized = normalizeModelOutput(raw, State.VISION_ACT, ctx);
+            List<Instruction> cmds = parseInstructions(normalized, 1);
+            if (cmds == null || cmds.isEmpty()) {
+                return false;
+            }
+
+            Instruction cmd = cmds.get(0);
+            String argErr = validateVisionCommandArgs(cmd);
+            if (!argErr.isEmpty()) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx.taskId);
+                ev.put("failed_index", failedIndex);
+                ev.put("command", cmd.raw);
+                ev.put("reason", argErr);
+                trace.event("fsm_routing_recovery_invalid_command", ev);
+                return false;
+            }
+
+            String op = cmd.op != null ? cmd.op : "";
+            if ("FAIL".equals(op) || "DONE".equals(op)) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx.taskId);
+                ev.put("failed_index", failedIndex);
+                ev.put("command", cmd.raw);
+                ev.put("result", "not_popup");
+                trace.event("fsm_routing_recovery_decision", ev);
+                return false;
+            }
+            if (!"TAP".equals(op) && !"BACK".equals(op) && !"WAIT".equals(op)) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", ctx.taskId);
+                ev.put("failed_index", failedIndex);
+                ev.put("command", cmd.raw);
+                ev.put("result", "unsupported_op");
+                trace.event("fsm_routing_recovery_decision", ev);
+                return false;
+            }
+
+            boolean ok = execActionCommand(ctx, cmd);
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("task_id", ctx.taskId);
+            done.put("failed_index", failedIndex);
+            done.put("command", cmd.raw);
+            done.put("op", op);
+            done.put("action_ok", ok);
+            trace.event("fsm_routing_recovery_exec", done);
+            if (ok) {
+                ctx.error = "";
+            }
+            return ok;
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx != null ? ctx.taskId : "");
+            ev.put("package", pkg);
+            ev.put("failed_index", failedIndex);
+            ev.put("err", String.valueOf(e));
+            trace.event("fsm_routing_recovery_err", ev);
+            return false;
+        }
+    }
+
+    private String buildRoutingRecoveryPrompt(
+            Context ctx,
+            String pkg,
+            int failedIndex,
+            RouteMap.Transition failedTransition,
+            String failReason
+    ) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("You are assisting ROUTING recovery on Android UI.\n");
+        sb.append("Task: determine whether a FULL-SCREEN or LARGE blocking popup/overlay is preventing route locator matching.\n");
+        sb.append("Only handle severe blockers that occupy most of the screen and block normal interaction.\n");
+        sb.append("If such blocker exists, output ONE dismiss action command.\n");
+        sb.append("If not, output FAIL not_popup.\n");
+        sb.append("\n");
+        sb.append("Current context:\n");
+        sb.append("- package: ").append(pkg).append("\n");
+        sb.append("- user_task: ").append(ctx != null ? stringOrEmpty(ctx.userTask) : "").append("\n");
+        sb.append("- failed_route_step_index: ").append(failedIndex).append("\n");
+        sb.append("- failed_from_page: ").append(failedTransition != null ? stringOrEmpty(failedTransition.fromPage) : "").append("\n");
+        sb.append("- failed_to_page: ").append(failedTransition != null ? stringOrEmpty(failedTransition.toPage) : "").append("\n");
+        sb.append("- failed_reason: ").append(failReason != null ? failReason : "").append("\n");
+        sb.append("\n");
+        sb.append("Allowed outputs (one line only):\n");
+        sb.append("- TAP x y      (x,y normalized in [0,1000])\n");
+        sb.append("- BACK\n");
+        sb.append("- WAIT ms\n");
+        sb.append("- FAIL not_popup\n");
+        sb.append("\n");
+        sb.append("Rules:\n");
+        sb.append("1) Output exactly one command line, no extra text.\n");
+        sb.append("2) Treat as popup only when it is full-screen or large center modal/overlay (roughly >= 40% screen area), and it blocks routing interaction.\n");
+        sb.append("3) Ignore small ads/cards/inline banners/floating widgets that do not block the whole page; for these output FAIL not_popup.\n");
+        sb.append("4) Only close the blocker; do not perform business actions.\n");
+        sb.append("5) If uncertain, output FAIL not_popup.\n");
+        return sb.toString();
+    }
+
+    private boolean tryTapRoutingSkipCandidate(Context ctx, String pkg, int stepIndex, int probeIndex) {
+        try {
+            byte[] payload = perception != null ? perception.handleDumpActions(new byte[0]) : null;
+            List<DumpActionsParser.ActionNode> nodes = DumpActionsParser.parse(payload);
+            if (nodes == null || nodes.isEmpty()) {
+                return false;
+            }
+
+            int screenW = parseIntLike(ctx.deviceInfo.get("width"), 0);
+            int screenH = parseIntLike(ctx.deviceInfo.get("height"), 0);
+            if (screenW <= 0 || screenH <= 0) {
+                for (DumpActionsParser.ActionNode n : nodes) {
+                    if (n == null || n.bounds == null) {
+                        continue;
+                    }
+                    screenW = Math.max(screenW, n.bounds.right);
+                    screenH = Math.max(screenH, n.bounds.bottom);
+                }
+            }
+            if (screenW <= 0) {
+                screenW = 1080;
+            }
+            if (screenH <= 0) {
+                screenH = 2400;
+            }
+
+            SkipCandidate best = null;
+            int matched = 0;
+            for (DumpActionsParser.ActionNode n : nodes) {
+                SkipCandidate c = scoreSplashSkipCandidate(n, screenW, screenH);
+                if (c == null) {
+                    continue;
+                }
+                matched += 1;
+                if (best == null || c.score > best.score) {
+                    best = c;
+                }
+            }
+
+            if (best != null) {
+                Map<String, Object> probeEv = new LinkedHashMap<>();
+                probeEv.put("task_id", ctx.taskId);
+                probeEv.put("package", pkg);
+                probeEv.put("index", stepIndex);
+                probeEv.put("probe", probeIndex);
+                probeEv.put("matched", matched);
+                probeEv.put("best_score", best.score);
+                probeEv.put("best_text", best.label);
+                probeEv.put("best_x", best.x);
+                probeEv.put("best_y", best.y);
+                trace.event("fsm_routing_first_step_skip_probe", probeEv);
+            }
+
+            if (best == null || best.score < ROUTING_FIRST_STEP_SKIP_MIN_SCORE) {
+                return false;
+            }
+
+            boolean tapOk = sendTap(best.x, best.y);
+            Map<String, Object> tapEv = new LinkedHashMap<>();
+            tapEv.put("task_id", ctx.taskId);
+            tapEv.put("package", pkg);
+            tapEv.put("index", stepIndex);
+            tapEv.put("probe", probeIndex);
+            tapEv.put("x", best.x);
+            tapEv.put("y", best.y);
+            tapEv.put("score", best.score);
+            tapEv.put("text", best.label);
+            tapEv.put("tap_ok", tapOk);
+            trace.event("fsm_routing_first_step_skip_tap", tapEv);
+            return tapOk;
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", ctx != null ? ctx.taskId : "");
+            ev.put("package", pkg);
+            ev.put("index", stepIndex);
+            ev.put("probe", probeIndex);
+            ev.put("err", String.valueOf(e));
+            trace.event("fsm_routing_first_step_skip_err", ev);
             return false;
         }
     }
@@ -2733,12 +3136,9 @@ public class CortexFsmEngine {
         }
         ctx.visionTurns += 1;
 
-        // Optional one-time settle on first vision turn.
+        // First turn uses the same dump-actions based settle logic as action-post settle.
         if (ctx.visionTurns == 1) {
-            try {
-                Thread.sleep(600); // screenshot_settle_sec ~0.6s
-            } catch (InterruptedException ignored) {
-            }
+            waitForUiStableByDumpActions(ctx, "FIRST_TURN_PRE_SCREENSHOT");
         }
 
         // Fast local splash-ad skip:
@@ -3266,6 +3666,16 @@ public class CortexFsmEngine {
             this.y = y;
             this.score = score;
             this.label = label != null ? label : "";
+        }
+    }
+
+    private static class RouteStepExec {
+        final Map<String, Object> step;
+        final boolean ok;
+
+        RouteStepExec(Map<String, Object> step, boolean ok) {
+            this.step = step != null ? step : new LinkedHashMap<String, Object>();
+            this.ok = ok;
         }
     }
 
