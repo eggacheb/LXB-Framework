@@ -74,6 +74,13 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            // Make launcher label explicit to avoid confusing with release app.
+            resValue("string", "app_name", "LXB Ignition (Debug)")
+        }
+
         release {
             isMinifyEnabled = false
             signingConfig = if (hasCustomReleaseSigning

@@ -3,7 +3,10 @@ package com.lxb.server.execution;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
+import com.lxb.server.cortex.json.Json;
 import com.lxb.server.system.UiAutomationWrapper;
 
 /**
@@ -23,9 +26,12 @@ import com.lxb.server.system.UiAutomationWrapper;
 public class ExecutionEngine {
 
     private static final String TAG = "[LXB][Execution]";
+    private static final int DEFAULT_SYSTEM_CONTROL_TIMEOUT_MS = 8000;
+    private static final int SCREEN_RECORD_VERIFY_DELAY_MS = 500;
 
     // 系统层依赖
     private UiAutomationWrapper uiAutomation;
+    private volatile int lastScreenRecordPid = -1;
     private static final int INPUT_METHOD_ADB = 0;
     private static final int INPUT_METHOD_CLIPBOARD = 1;
     private static final int INPUT_METHOD_ACCESSIBILITY = 2;
@@ -524,5 +530,398 @@ public class ExecutionEngine {
         response.put(jsonBytes);
 
         return response.array();
+    }
+
+    /**
+     * Handle generic system shell controls (0x49).
+     *
+     * Payload format: UTF-8 JSON object
+     *   {"action":"wifi_set","enabled":true}
+     *
+     * Response format: status[1B] + json_len[2B] + json_data[UTF-8]
+     */
+    public byte[] handleSystemControl(byte[] payload) {
+        if (uiAutomation == null) {
+            return packJsonResponse(false, buildError("system_control", "UiAutomation not available"));
+        }
+
+        if (payload == null || payload.length == 0) {
+            return packJsonResponse(false, buildError("system_control", "payload is required"));
+        }
+
+        final String reqText = new String(payload, StandardCharsets.UTF_8);
+        final Map<String, Object> req;
+        try {
+            req = Json.parseObject(reqText);
+        } catch (Exception e) {
+            return packJsonResponse(false, buildError("system_control", "invalid json payload: " + e.getMessage()));
+        }
+
+        String action = asString(req.get("action"), "").trim().toLowerCase();
+        if (action.isEmpty()) {
+            return packJsonResponse(false, buildError("system_control", "action is required"));
+        }
+
+        int timeoutMs = asInt(req.get("timeout_ms"), DEFAULT_SYSTEM_CONTROL_TIMEOUT_MS);
+        if (timeoutMs < 500) timeoutMs = 500;
+        if (timeoutMs > 120000) timeoutMs = 120000;
+
+        Map<String, Object> out;
+        try {
+            out = executeSystemControlAction(action, req, timeoutMs);
+        } catch (Exception e) {
+            out = buildError(action, e.getMessage());
+        }
+
+        boolean ok = asBoolean(out.get("ok"), false);
+        return packJsonResponse(ok, out);
+    }
+
+    private Map<String, Object> executeSystemControlAction(String action, Map<String, Object> req, int timeoutMs) {
+        if ("panel_expand_notifications".equals(action)) {
+            return runShellAction(action, "cmd statusbar expand-notifications", timeoutMs);
+        }
+        if ("panel_expand_settings".equals(action) || "panel_expand_quick_settings".equals(action)) {
+            return runShellAction(action, "cmd statusbar expand-settings", timeoutMs);
+        }
+        if ("panel_collapse".equals(action)) {
+            return runShellAction(action, "cmd statusbar collapse", timeoutMs);
+        }
+        if ("wifi_set".equals(action)) {
+            boolean enabled = readEnabled(req, true);
+            return runShellAction(action, enabled ? "svc wifi enable" : "svc wifi disable", timeoutMs);
+        }
+        if ("bluetooth_set".equals(action)) {
+            boolean enabled = readEnabled(req, true);
+            return runShellAction(action, enabled ? "svc bluetooth enable" : "svc bluetooth disable", timeoutMs);
+        }
+        if ("airplane_set".equals(action)) {
+            boolean enabled = readEnabled(req, true);
+            String state = enabled ? "1" : "0";
+            String boolState = enabled ? "true" : "false";
+            String cmd = "settings put global airplane_mode_on " + state
+                    + "; am broadcast -a android.intent.action.AIRPLANE_MODE --ez state " + boolState;
+            return runShellAction(action, cmd, timeoutMs);
+        }
+        if ("dnd_set".equals(action)) {
+            String mode = asString(req.get("mode"), "off").trim().toLowerCase();
+            String dndMode;
+            if ("on".equals(mode) || "priority".equals(mode)) dndMode = "priority";
+            else if ("alarms".equals(mode)) dndMode = "alarms";
+            else if ("none".equals(mode) || "total_silence".equals(mode)) dndMode = "none";
+            else dndMode = "off";
+            return runShellAction(action, "cmd notification set_dnd " + dndMode, timeoutMs);
+        }
+        if ("brightness_set".equals(action)) {
+            int value = asInt(req.get("value"), 128);
+            if (value < 0) value = 0;
+            if (value > 255) value = 255;
+            String cmd = "settings put system screen_brightness_mode 0; settings put system screen_brightness " + value;
+            Map<String, Object> out = runShellAction(action, cmd, timeoutMs);
+            out.put("value", value);
+            return out;
+        }
+        if ("brightness_mode".equals(action)) {
+            String mode = asString(req.get("mode"), "manual").trim().toLowerCase();
+            int modeValue = "auto".equals(mode) ? 1 : 0;
+            Map<String, Object> out = runShellAction(action, "settings put system screen_brightness_mode " + modeValue, timeoutMs);
+            out.put("mode", modeValue == 1 ? "auto" : "manual");
+            return out;
+        }
+        if ("volume_set".equals(action)) {
+            int stream = resolveAudioStream(req);
+            int level = asInt(req.get("level"), 5);
+            if (level < 0) level = 0;
+            String cmd = "media volume --stream " + stream + " --set " + level;
+            Map<String, Object> out = runShellAction(action, cmd, timeoutMs);
+            out.put("stream", stream);
+            out.put("level", level);
+            return out;
+        }
+        if ("volume_adjust".equals(action)) {
+            int stream = resolveAudioStream(req);
+            String direction = asString(req.get("direction"), "raise").trim().toLowerCase();
+            if (!"lower".equals(direction) && !"mute".equals(direction) && !"unmute".equals(direction)) {
+                direction = "raise";
+            }
+            String cmd = "media volume --stream " + stream + " --adj " + direction;
+            Map<String, Object> out = runShellAction(action, cmd, timeoutMs);
+            out.put("stream", stream);
+            out.put("direction", direction);
+            return out;
+        }
+        if ("rotation_set".equals(action)) {
+            String mode = asString(req.get("mode"), "auto").trim().toLowerCase();
+            if ("auto".equals(mode)) {
+                return runShellAction(action, "settings put system accelerometer_rotation 1", timeoutMs);
+            }
+            int rotation = 0;
+            if ("landscape".equals(mode)) rotation = 1;
+            else if ("reverse_portrait".equals(mode)) rotation = 2;
+            else if ("reverse_landscape".equals(mode)) rotation = 3;
+            String cmd = "settings put system accelerometer_rotation 0; settings put system user_rotation " + rotation;
+            Map<String, Object> out = runShellAction(action, cmd, timeoutMs);
+            out.put("mode", mode);
+            out.put("rotation", rotation);
+            return out;
+        }
+        if ("media_key".equals(action)) {
+            String key = asString(req.get("key"), "play_pause").trim().toLowerCase();
+            int keyCode = resolveMediaKeyCode(key);
+            if (keyCode <= 0) {
+                return buildError(action, "unsupported media key: " + key);
+            }
+            Map<String, Object> out = runShellAction(action, "input keyevent " + keyCode, timeoutMs);
+            out.put("key", key);
+            out.put("keycode", keyCode);
+            return out;
+        }
+        if ("torch_set".equals(action)) {
+            boolean enabled = readEnabled(req, true);
+            String cmd = enabled
+                    ? "(cmd flashlight set 1 || cmd flashlight on || cmd statusbar torch on)"
+                    : "(cmd flashlight set 0 || cmd flashlight off || cmd statusbar torch off)";
+            return runShellAction(action, cmd, timeoutMs);
+        }
+        if ("screen_record_start".equals(action)) {
+            String path = asString(req.get("path"), "").trim();
+            if (path.isEmpty()) {
+                path = "/sdcard/Movies/lxb_record_" + System.currentTimeMillis() + ".mp4";
+            }
+            int bitRate = asInt(req.get("bit_rate"), 0);
+            int timeLimit = asInt(req.get("time_limit_sec"), 0);
+            String size = asString(req.get("size"), "").trim();
+            StringBuilder recordCmd = new StringBuilder("screenrecord");
+            if (bitRate > 0) recordCmd.append(" --bit-rate ").append(bitRate);
+            if (timeLimit > 0) recordCmd.append(" --time-limit ").append(timeLimit);
+            if (!size.isEmpty()) recordCmd.append(" --size ").append(size);
+            recordCmd.append(" ").append(shellQuote(path));
+
+            // Use nohup to prevent process from being terminated when parent shell exits.
+            String cmd = "mkdir -p $(dirname " + shellQuote(path) + "); nohup "
+                    + recordCmd + " >/dev/null 2>&1 < /dev/null & echo $!";
+            UiAutomationWrapper.ShellCommandResult start = uiAutomation.runShellCommand(cmd, timeoutMs);
+
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("action", action);
+            out.put("path", path);
+            out.put("command", cmd);
+            out.put("exit_code", start.exitCode);
+            out.put("timeout", start.timeout);
+            if (start.stdout != null && !start.stdout.isEmpty()) out.put("stdout", start.stdout);
+            if (start.stderr != null && !start.stderr.isEmpty()) out.put("stderr", start.stderr);
+
+            if (!start.ok) {
+                out.put("ok", false);
+                out.put("error", "failed_to_start_record_process");
+                return out;
+            }
+
+            int pid = parseFirstInt(start.stdout);
+            if (pid <= 0) {
+                out.put("ok", false);
+                out.put("error", "screenrecord_pid_not_found");
+                return out;
+            }
+
+            try { Thread.sleep(SCREEN_RECORD_VERIFY_DELAY_MS); } catch (InterruptedException ignored) {}
+            UiAutomationWrapper.ShellCommandResult aliveCheck =
+                    uiAutomation.runShellCommand("kill -0 " + pid, Math.min(timeoutMs, 2000));
+            boolean alive = aliveCheck.ok;
+
+            out.put("pid", pid);
+            out.put("alive", alive);
+            if (!alive) {
+                out.put("ok", false);
+                out.put("error", "screenrecord_exited_immediately");
+                return out;
+            }
+
+            lastScreenRecordPid = pid;
+            out.put("ok", true);
+            return out;
+        }
+        if ("screen_record_stop".equals(action)) {
+            int pid = lastScreenRecordPid;
+            if (pid > 0) {
+                UiAutomationWrapper.ShellCommandResult stopByPid =
+                        uiAutomation.runShellCommand("kill -INT " + pid, timeoutMs);
+                Map<String, Object> out = new LinkedHashMap<>();
+                out.put("action", action);
+                out.put("pid", pid);
+                out.put("command", "kill -INT " + pid);
+                out.put("exit_code", stopByPid.exitCode);
+                out.put("timeout", stopByPid.timeout);
+                if (stopByPid.stdout != null && !stopByPid.stdout.isEmpty()) out.put("stdout", stopByPid.stdout);
+                if (stopByPid.stderr != null && !stopByPid.stderr.isEmpty()) out.put("stderr", stopByPid.stderr);
+
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                UiAutomationWrapper.ShellCommandResult aliveCheck =
+                        uiAutomation.runShellCommand("kill -0 " + pid, 1200);
+                boolean stillAlive = aliveCheck.ok;
+                out.put("stopped", !stillAlive);
+                out.put("ok", !stillAlive);
+                if (!stillAlive) {
+                    lastScreenRecordPid = -1;
+                    return out;
+                }
+            }
+
+            Map<String, Object> fallback = runShellAction(action, "pkill -INT -f screenrecord", timeoutMs);
+            if (asBoolean(fallback.get("ok"), false)) {
+                lastScreenRecordPid = -1;
+            }
+            return fallback;
+        }
+        if ("doze_whitelist_add".equals(action) || "doze_whitelist_remove".equals(action)) {
+            String pkg = asString(req.get("package"), "").trim();
+            if (pkg.isEmpty()) {
+                return buildError(action, "package is required");
+            }
+            String prefix = "doze_whitelist_add".equals(action) ? "+" : "-";
+            Map<String, Object> out = runShellAction(action, "dumpsys deviceidle whitelist " + prefix + pkg, timeoutMs);
+            out.put("package", pkg);
+            return out;
+        }
+        if ("screen_off".equals(action)) {
+            return runShellAction(action, "input keyevent 26", timeoutMs);
+        }
+        if ("wake_up".equals(action)) {
+            return runShellAction(action, "input keyevent 224", timeoutMs);
+        }
+        if ("shell_exec".equals(action)) {
+            String command = asString(req.get("command"), "").trim();
+            if (command.isEmpty()) {
+                return buildError(action, "command is required");
+            }
+            return runShellAction(action, command, timeoutMs);
+        }
+
+        return buildError(action, "unsupported action");
+    }
+
+    private Map<String, Object> runShellAction(String action, String command, int timeoutMs) {
+        UiAutomationWrapper.ShellCommandResult r = uiAutomation.runShellCommand(command, timeoutMs);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", r.ok);
+        out.put("action", action);
+        out.put("command", command);
+        out.put("exit_code", r.exitCode);
+        out.put("timeout", r.timeout);
+        if (r.stdout != null && !r.stdout.isEmpty()) out.put("stdout", r.stdout);
+        if (r.stderr != null && !r.stderr.isEmpty()) out.put("stderr", r.stderr);
+        return out;
+    }
+
+    private Map<String, Object> buildError(String action, String message) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", false);
+        out.put("action", action);
+        out.put("error", message != null ? message : "unknown_error");
+        return out;
+    }
+
+    private boolean readEnabled(Map<String, Object> req, boolean defaultValue) {
+        Object enabledValue = req.get("enabled");
+        if (enabledValue != null) {
+            return asBoolean(enabledValue, defaultValue);
+        }
+        Object stateValue = req.get("state");
+        String state = asString(stateValue, "").trim().toLowerCase();
+        if ("on".equals(state) || "enable".equals(state) || "enabled".equals(state) || "true".equals(state)) {
+            return true;
+        }
+        if ("off".equals(state) || "disable".equals(state) || "disabled".equals(state) || "false".equals(state)) {
+            return false;
+        }
+        return defaultValue;
+    }
+
+    private int resolveAudioStream(Map<String, Object> req) {
+        Object streamObj = req.get("stream");
+        if (streamObj instanceof Number) {
+            int s = ((Number) streamObj).intValue();
+            if (s >= 0 && s <= 10) return s;
+        }
+        String stream = asString(streamObj, "music").trim().toLowerCase();
+        if ("voice".equals(stream) || "voice_call".equals(stream) || "call".equals(stream)) return 0;
+        if ("system".equals(stream)) return 1;
+        if ("ring".equals(stream)) return 2;
+        if ("music".equals(stream) || "media".equals(stream)) return 3;
+        if ("alarm".equals(stream)) return 4;
+        if ("notification".equals(stream)) return 5;
+        if ("bluetooth".equals(stream)) return 6;
+        return 3;
+    }
+
+    private int resolveMediaKeyCode(String key) {
+        if ("play_pause".equals(key)) return 85;
+        if ("next".equals(key)) return 87;
+        if ("previous".equals(key) || "prev".equals(key)) return 88;
+        if ("play".equals(key)) return 126;
+        if ("pause".equals(key)) return 127;
+        if ("stop".equals(key)) return 86;
+        if ("mute".equals(key)) return 164;
+        if ("volume_up".equals(key)) return 24;
+        if ("volume_down".equals(key)) return 25;
+        return -1;
+    }
+
+    private byte[] packJsonResponse(boolean ok, Map<String, Object> obj) {
+        String json = Json.stringify(obj != null ? obj : new LinkedHashMap<String, Object>());
+        byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer response = ByteBuffer.allocate(3 + jsonBytes.length);
+        response.order(ByteOrder.BIG_ENDIAN);
+        response.put((byte) (ok ? 0x01 : 0x00));
+        response.putShort((short) jsonBytes.length);
+        response.put(jsonBytes);
+        return response.array();
+    }
+
+    private String asString(Object v, String def) {
+        if (v == null) return def;
+        return String.valueOf(v);
+    }
+
+    private int asInt(Object v, int def) {
+        if (v == null) return def;
+        if (v instanceof Number) return ((Number) v).intValue();
+        try {
+            return Integer.parseInt(String.valueOf(v).trim());
+        } catch (Exception ignored) {
+            return def;
+        }
+    }
+
+    private boolean asBoolean(Object v, boolean def) {
+        if (v == null) return def;
+        if (v instanceof Boolean) return (Boolean) v;
+        String s = String.valueOf(v).trim().toLowerCase();
+        if ("1".equals(s) || "true".equals(s) || "yes".equals(s) || "on".equals(s) || "enable".equals(s) || "enabled".equals(s)) {
+            return true;
+        }
+        if ("0".equals(s) || "false".equals(s) || "no".equals(s) || "off".equals(s) || "disable".equals(s) || "disabled".equals(s)) {
+            return false;
+        }
+        return def;
+    }
+
+    private int parseFirstInt(String text) {
+        if (text == null) return -1;
+        String[] parts = text.trim().split("\\s+");
+        for (String p : parts) {
+            if (p == null || p.isEmpty()) continue;
+            try {
+                int v = Integer.parseInt(p);
+                if (v > 0) return v;
+            } catch (Exception ignored) {
+            }
+        }
+        return -1;
+    }
+
+    private String shellQuote(String s) {
+        if (s == null) return "''";
+        return "'" + s.replace("'", "'\"'\"'") + "'";
     }
 }

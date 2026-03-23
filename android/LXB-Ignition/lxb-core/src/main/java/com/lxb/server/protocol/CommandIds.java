@@ -38,6 +38,7 @@ public final class CommandIds {
     public static final byte CMD_LAUNCH_APP = 0x43;
     public static final byte CMD_STOP_APP = 0x44;
     public static final byte CMD_LIST_APPS = 0x48;
+    public static final byte CMD_SYSTEM_CONTROL = 0x49;
 
     // Media layer
     public static final byte CMD_SCREENSHOT = 0x60;

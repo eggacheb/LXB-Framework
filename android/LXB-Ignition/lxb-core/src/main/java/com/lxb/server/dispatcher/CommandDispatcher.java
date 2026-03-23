@@ -117,6 +117,9 @@ public class CommandDispatcher {
                 case CommandIds.CMD_LIST_APPS:
                     response = executionEngine.handleListApps(payload);
                     break;
+                case CommandIds.CMD_SYSTEM_CONTROL:
+                    response = executionEngine.handleSystemControl(payload);
+                    break;
 
                 // Media Layer
                 case CommandIds.CMD_SCREENSHOT:

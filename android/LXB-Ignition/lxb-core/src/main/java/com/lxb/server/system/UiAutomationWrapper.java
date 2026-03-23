@@ -1,17 +1,21 @@
 package com.lxb.server.system;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * UiAutomation 系统层封装 (纯反射实现)
@@ -1620,6 +1624,113 @@ public class UiAutomationWrapper {
             return "";
         } finally {
             try { if (reader != null) reader.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    public static final class ShellCommandResult {
+        public final boolean ok;
+        public final boolean timeout;
+        public final int exitCode;
+        public final String stdout;
+        public final String stderr;
+
+        ShellCommandResult(boolean ok, boolean timeout, int exitCode, String stdout, String stderr) {
+            this.ok = ok;
+            this.timeout = timeout;
+            this.exitCode = exitCode;
+            this.stdout = stdout != null ? stdout : "";
+            this.stderr = stderr != null ? stderr : "";
+        }
+    }
+
+    private static final class StreamCollector extends Thread {
+        private final InputStream in;
+        private final int limitBytes;
+        private final ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        StreamCollector(InputStream in, int limitBytes) {
+            this.in = in;
+            this.limitBytes = Math.max(256, limitBytes);
+            setDaemon(true);
+        }
+
+        @Override
+        public void run() {
+            byte[] buf = new byte[512];
+            try {
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    if (n <= 0) continue;
+                    int canWrite = Math.min(n, Math.max(0, limitBytes - out.size()));
+                    if (canWrite > 0) {
+                        out.write(buf, 0, canWrite);
+                    }
+                    if (out.size() >= limitBytes) {
+                        // Continue draining input to avoid child-process pipe block.
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                try { in.close(); } catch (Exception ignored) {}
+            }
+        }
+
+        String text() {
+            return new String(out.toByteArray(), StandardCharsets.UTF_8).trim();
+        }
+    }
+
+    /**
+     * Execute shell command and capture stdout/stderr with timeout.
+     *
+     * Notes:
+     * - Intended for short control commands (svc/settings/cmd/input).
+     * - Output is truncated to protect protocol payload size.
+     */
+    public ShellCommandResult runShellCommand(String command, int timeoutMs) {
+        String cmd = command != null ? command.trim() : "";
+        if (cmd.isEmpty()) {
+            return new ShellCommandResult(false, false, -1, "", "empty command");
+        }
+
+        int timeout = timeoutMs > 0 ? timeoutMs : 8000;
+        StreamCollector outCollector = null;
+        StreamCollector errCollector = null;
+        Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{"sh", "-c", cmd});
+            outCollector = new StreamCollector(process.getInputStream(), 4096);
+            errCollector = new StreamCollector(process.getErrorStream(), 4096);
+            outCollector.start();
+            errCollector.start();
+
+            boolean finished = process.waitFor(timeout, TimeUnit.MILLISECONDS);
+            if (!finished) {
+                try { process.destroy(); } catch (Exception ignored) {}
+                try { process.destroyForcibly(); } catch (Exception ignored) {}
+                if (outCollector != null) outCollector.join(200);
+                if (errCollector != null) errCollector.join(200);
+                return new ShellCommandResult(false, true, -1,
+                        outCollector != null ? outCollector.text() : "",
+                        errCollector != null ? errCollector.text() : "");
+            }
+
+            int exitCode = process.exitValue();
+            if (outCollector != null) outCollector.join(200);
+            if (errCollector != null) errCollector.join(200);
+            return new ShellCommandResult(
+                    exitCode == 0,
+                    false,
+                    exitCode,
+                    outCollector != null ? outCollector.text() : "",
+                    errCollector != null ? errCollector.text() : ""
+            );
+        } catch (Exception e) {
+            return new ShellCommandResult(false, false, -1, "", e.getMessage());
+        } finally {
+            if (process != null) {
+                try { process.destroy(); } catch (Exception ignored) {}
+            }
         }
     }
 
