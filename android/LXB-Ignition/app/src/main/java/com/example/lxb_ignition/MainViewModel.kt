@@ -145,6 +145,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val source: String,
         val scheduleId: String,
         val memoryApplied: Boolean,
+        val recordEnabled: Boolean,
+        val recordFile: String,
         val createdAt: Long,
         val finishedAt: Long
     )
@@ -158,6 +160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val userTask: String,
         val packageName: String,
         val startPage: String,
+        val recordEnabled: Boolean,
         val runAtMs: Long,
         val repeatMode: String,
         val repeatWeekdays: Int,
@@ -179,8 +182,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val scheduleRepeatMode = MutableStateFlow(REPEAT_ONCE)
     val scheduleRepeatWeekdays = MutableStateFlow(0b0011111) // Mon-Fri
     val schedulePackage = MutableStateFlow("")
-    val scheduleStartPage = MutableStateFlow("")
     val schedulePlaybook = MutableStateFlow("")
+    val scheduleRecordEnabled = MutableStateFlow(false)
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -444,6 +447,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             source = t.optString("source", ""),
                             scheduleId = t.optString("schedule_id", ""),
                             memoryApplied = t.optBoolean("memory_applied", false),
+                            recordEnabled = t.optBoolean("record_enabled", false),
+                            recordFile = t.optString("record_file", ""),
                             createdAt = t.optLong("created_at", 0L),
                             finishedAt = t.optLong("finished_at", 0L)
                         )
@@ -499,6 +504,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             userTask = s.optString("user_task", ""),
                             packageName = s.optString("package", ""),
                             startPage = s.optString("start_page", ""),
+                            recordEnabled = s.optBoolean("record_enabled", false),
                             runAtMs = s.optLong("run_at", 0L),
                             repeatMode = s.optString(
                                 "repeat_mode",
@@ -535,8 +541,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val name = scheduleName.value.trim()
         val task = scheduleTask.value.trim()
         val packageName = schedulePackage.value.trim()
-        val startPage = scheduleStartPage.value.trim()
         val playbook = schedulePlaybook.value.trim()
+        val recordEnabled = scheduleRecordEnabled.value
         if (task.isEmpty()) {
             appendSystemMessage("Schedule task cannot be empty.")
             return
@@ -565,7 +571,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .put("name", name)
                         .put("user_task", task)
                         .put("package", packageName)
-                        .put("start_page", startPage)
                         .put("trace_mode", "push")
                         .put("trace_udp_port", TRACE_PUSH_PORT)
                         .put("run_at", runAt)
@@ -573,6 +578,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .put("repeat_weekdays", repeatWeekdays and 0x7F)
                         .put("repeat_daily", repeatMode == REPEAT_DAILY) // backward compatibility
                         .put("user_playbook", playbook)
+                        .put("record_enabled", recordEnabled)
                         .toString()
                     val resp = client.sendCommand(
                         CommandIds.CMD_CORTEX_SCHEDULE_ADD,
@@ -618,8 +624,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val name = scheduleName.value.trim()
         val task = scheduleTask.value.trim()
         val packageName = schedulePackage.value.trim()
-        val startPage = scheduleStartPage.value.trim()
         val playbook = schedulePlaybook.value.trim()
+        val recordEnabled = scheduleRecordEnabled.value
         if (task.isEmpty()) {
             appendSystemMessage("Schedule task cannot be empty.")
             return
@@ -649,7 +655,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .put("name", name)
                         .put("user_task", task)
                         .put("package", packageName)
-                        .put("start_page", startPage)
                         .put("trace_mode", "push")
                         .put("trace_udp_port", TRACE_PUSH_PORT)
                         .put("run_at", runAt)
@@ -657,6 +662,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .put("repeat_weekdays", repeatWeekdays and 0x7F)
                         .put("repeat_daily", repeatMode == REPEAT_DAILY) // backward compatibility
                         .put("user_playbook", playbook)
+                        .put("record_enabled", recordEnabled)
                         .toString()
                     val resp = client.sendCommand(
                         CommandIds.CMD_CORTEX_SCHEDULE_UPDATE,
@@ -731,8 +737,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleRepeatMode.value = schedule.repeatMode.ifBlank { REPEAT_ONCE }
         scheduleRepeatWeekdays.value = schedule.repeatWeekdays
         schedulePackage.value = schedule.packageName
-        scheduleStartPage.value = schedule.startPage
         schedulePlaybook.value = schedule.userPlaybook
+        scheduleRecordEnabled.value = schedule.recordEnabled
     }
 
     fun resetScheduleForm() {
@@ -742,8 +748,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleRepeatMode.value = REPEAT_ONCE
         scheduleRepeatWeekdays.value = 0b0011111
         schedulePackage.value = ""
-        scheduleStartPage.value = ""
         schedulePlaybook.value = ""
+        scheduleRecordEnabled.value = false
     }
 
     /**

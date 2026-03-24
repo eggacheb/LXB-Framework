@@ -241,8 +241,9 @@ private val ZhMap = mapOf(
     "Pick Time" to "选择时间",
     "Name (optional)" to "名称（可选）",
     "Package (optional)" to "包名（可选）",
-    "Start page (optional)" to "起始页（可选）",
     "User playbook (optional)" to "用户操作文档（可选）",
+    "Record task screen" to "录制任务屏幕",
+    "Save task recording to Movies/lxb." to "将任务录屏保存到 Movies/lxb。",
     "Save" to "保存",
     "Submit" to "提交",
     "Cancel" to "取消",
@@ -318,8 +319,8 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val scheduleRepeatMode by viewModel.scheduleRepeatMode.collectAsState()
     val scheduleRepeatWeekdays by viewModel.scheduleRepeatWeekdays.collectAsState()
     val schedulePackage by viewModel.schedulePackage.collectAsState()
-    val scheduleStartPage by viewModel.scheduleStartPage.collectAsState()
     val schedulePlaybook by viewModel.schedulePlaybook.collectAsState()
+    val scheduleRecordEnabled by viewModel.scheduleRecordEnabled.collectAsState()
     var page by rememberSaveable { mutableIntStateOf(0) }
     var editingScheduleId by rememberSaveable { mutableStateOf("") }
     var selectedTask by remember { mutableStateOf<MainViewModel.TaskSummary?>(null) }
@@ -725,19 +726,33 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                             singleLine = true
                         )
                         OutlinedTextField(
-                            value = scheduleStartPage,
-                            onValueChange = { viewModel.scheduleStartPage.value = it },
-                            label = { Text(tr("Start page (optional)")) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
                             value = schedulePlaybook,
                             onValueChange = { viewModel.schedulePlaybook.value = it },
                             label = { Text(tr("User playbook (optional)")) },
                             modifier = Modifier.fillMaxWidth(),
                             maxLines = 4
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = tr("Record task screen"),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    text = tr("Save task recording to Movies/lxb."),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                                )
+                            }
+                            Switch(
+                                checked = scheduleRecordEnabled,
+                                onCheckedChange = { viewModel.scheduleRecordEnabled.value = it }
+                            )
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -834,6 +849,10 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                         Text("schedule_id=${detail.scheduleId}", fontSize = 11.sp)
                     }
                     Text("memory_applied=${detail.memoryApplied}", fontSize = 11.sp)
+                    Text("record_enabled=${detail.recordEnabled}", fontSize = 11.sp)
+                    if (detail.recordFile.isNotBlank()) {
+                        Text("record_file=${detail.recordFile}", fontSize = 11.sp)
+                    }
                     if (detail.createdAt > 0L) {
                         Text("created_at=${formatTsFull(detail.createdAt)}", fontSize = 11.sp)
                     }
@@ -869,7 +888,7 @@ fun ScheduleRow(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "run_at=${formatTsFull(schedule.runAtMs)}, repeat=${formatRepeat(schedule.repeatMode, schedule.repeatWeekdays)}, next=${formatTsFull(schedule.nextRunAt)}, triggered=${schedule.triggerCount}",
+                text = "run_at=${formatTsFull(schedule.runAtMs)}, repeat=${formatRepeat(schedule.repeatMode, schedule.repeatWeekdays)}, next=${formatTsFull(schedule.nextRunAt)}, triggered=${schedule.triggerCount}, record=${if (schedule.recordEnabled) "on" else "off"}",
                 fontSize = 11.sp,
                 color = scheme.onSurface.copy(alpha = 0.75f)
             )
