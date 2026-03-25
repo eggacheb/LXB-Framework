@@ -1,12 +1,17 @@
 ﻿package com.example.lxb_ignition
 
+import android.Manifest
 import android.app.DatePickerDialog
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.widget.EditText
 import android.widget.NumberPicker
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -34,8 +39,11 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -59,7 +67,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.lxb_ignition.shizuku.ShizukuManager
 import com.example.lxb_ignition.ui.theme.LXBIgnitionTheme
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -67,13 +74,37 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(
+                this,
+                "Notification permission is recommended for task/runtime status.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ensureNotificationPermissionOnLaunch()
         enableEdgeToEdge()
         setContent {
             LXBIgnitionTheme {
                 LXBIgnitionApp()
             }
+        }
+    }
+
+    private fun ensureNotificationPermissionOnLaunch() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }
@@ -83,12 +114,30 @@ class MainActivity : ComponentActivity() {
 fun LXBIgnitionApp(viewModel: MainViewModel = viewModel()) {
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val uiLang by viewModel.uiLang.collectAsState()
+    val appUpdateResult by viewModel.appUpdateResult.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
     val i18n = remember(uiLang) { UiI18n(uiLang) }
+
+    LaunchedEffect(appUpdateResult) {
+        if (appUpdateResult.isNotBlank()) {
+            snackbarHostState.showSnackbar(appUpdateResult)
+        }
+    }
 
     CompositionLocalProvider(LocalUiI18n provides i18n) {
         val tabs = listOf("Control", "Tasks", "Config", "Logs")
         Scaffold(
-            topBar = { TopAppBar(title = { Text(tr("LXB Ignition")) }) },
+            topBar = {
+                TopAppBar(
+                    title = { Text("${tr("LXB Ignition")} v${BuildConfig.VERSION_NAME}") },
+                    actions = {
+                        TextButton(onClick = { viewModel.checkAppUpdateFromGithub() }) {
+                            Text(tr("Check update"), fontSize = 12.sp)
+                        }
+                    }
+                )
+            },
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             bottomBar = {
                 NavigationBar {
                     tabs.forEachIndexed { index, rawLabel ->
@@ -117,8 +166,8 @@ fun LXBIgnitionApp(viewModel: MainViewModel = viewModel()) {
 
 @Composable
 fun ControlTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
-    val state by viewModel.state.collectAsState()
-    val statusMessage by viewModel.statusMessage.collectAsState()
+    val coreRuntime by viewModel.coreRuntimeStatus.collectAsState()
+    val wireless by viewModel.wirelessBootstrapStatus.collectAsState()
     val requirement by viewModel.requirement.collectAsState()
     val chatMessages by viewModel.chatMessages.collectAsState()
     val listState = rememberLazyListState()
@@ -135,15 +184,20 @@ fun ControlTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Shizuku / lxb-core status
-        ShizukuStatusCard(state = state, message = statusMessage)
+        ProcessRuntimeCard(
+            status = coreRuntime
+        )
 
-        // Start / stop lxb-core via Shizuku
-        ServerControlRow(
-            state = state,
-            onRequestPermission = { viewModel.requestShizukuPermission() },
-            onStart = { viewModel.startServer() },
-            onStop = { viewModel.stopServer() }
+        ProcessControlRow(
+            coreReady = coreRuntime.ready,
+            onStartNative = { viewModel.startServerWithNative() },
+            onStop = { viewModel.stopServerProcess() },
+            onRefreshState = { viewModel.refreshCoreRuntimeStatusNow() }
+        )
+
+        WirelessBootstrapCard(
+            status = wireless,
+            onStartGuide = { viewModel.startWirelessBootstrapGuide() }
         )
 
         // Chat-style task session
@@ -221,6 +275,8 @@ private fun tr(text: String): String = LocalUiI18n.current.tr(text)
 
 private val ZhMap = mapOf(
     "LXB Ignition" to "LXB 点火",
+    "Update" to "更新",
+    "Check update" to "检查更新",
     "Control" to "控制",
     "Tasks" to "任务",
     "Config" to "配置",
@@ -252,7 +308,14 @@ private val ZhMap = mapOf(
     "Hour" to "小时",
     "Minute" to "分钟",
     "OK" to "确定",
-    "Grant Shizuku" to "授予 Shizuku 权限",
+    "Core Connected" to "Core 已连接",
+    "Core Disconnected" to "Core 未连接",
+    "Start Native" to "原生启动",
+    "Refresh Core State" to "刷新 Core 状态",
+    "Wireless bootstrap" to "无线 ADB 引导",
+    "Wireless ADB bootstrap path (native). Start guide, then submit pairing code from notification." to "无线 ADB 引导路径（原生）。点击开始引导后，在通知栏仅输入配对码。",
+    "Open Developer Options (Start Guide)" to "打开开发者选项（开始引导）",
+    "State" to "状态",
     "Start" to "启动",
     "Config center" to "配置中心",
     "Choose a category to configure. Each section opens a dedicated settings page." to "选择一个配置类别，每个类别会进入独立配置页面。",
@@ -262,8 +325,6 @@ private val ZhMap = mapOf(
     "Chinese" to "中文",
     "Device core server" to "设备端核心服务",
     "TCP port and related options for lxb-core running on this device." to "配置设备端 lxb-core 的 TCP 端口与相关选项。",
-    "PC web_console" to "PC 调试控制台",
-    "IP/port for optional PC-side web_console debugging." to "可选：配置 PC 端 web_console 调试地址。",
     "LLM config (device-side)" to "设备端 LLM 配置",
     "Base URL, API key and model for device-side LLM/VLM calls." to "配置设备端 LLM/VLM 调用的 Base URL、API Key 与模型。",
     "Unlock & lock policy" to "解锁与锁屏策略",
@@ -278,10 +339,6 @@ private val ZhMap = mapOf(
     "lxb-core server" to "lxb-core 服务",
     "TCP port" to "TCP 端口",
     "TCP port listened by lxb-core on device (default 12345)" to "设备端 lxb-core 监听的 TCP 端口（默认 12345）",
-    "Server IP" to "服务器 IP",
-    "IP address of the PC running web_console" to "运行 web_console 的 PC IP 地址",
-    "Server port" to "服务器端口",
-    "Flask port of web_console (default 5000)" to "web_console 的 Flask 端口（默认 5000）",
     "API Base URL" to "API Base URL",
     "API Key" to "API Key",
     "Model" to "模型",
@@ -1184,14 +1241,11 @@ fun ChatBubble(message: MainViewModel.ChatMessage) {
 }
 
 @Composable
-fun ShizukuStatusCard(state: ShizukuManager.State, message: String) {
-    val (bgColor, label) = when (state) {
-        ShizukuManager.State.UNAVAILABLE -> Color(0xFF9E9E9E) to "Shizuku unavailable"
-        ShizukuManager.State.PERMISSION_DENIED -> Color(0xFFFF9800) to "Permission required"
-        ShizukuManager.State.READY -> Color(0xFF2196F3) to "Ready"
-        ShizukuManager.State.STARTING -> Color(0xFF9C27B0) to "Starting..."
-        ShizukuManager.State.RUNNING -> Color(0xFF4CAF50) to "Running"
-        ShizukuManager.State.ERROR -> Color(0xFFF44336) to "Error"
+fun ProcessRuntimeCard(status: MainViewModel.CoreRuntimeStatus) {
+    val (bgColor, label) = if (status.ready) {
+        Color(0xFF4CAF50) to tr("Core Connected")
+    } else {
+        Color(0xFF9E9E9E) to tr("Core Disconnected")
     }
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1199,65 +1253,97 @@ fun ShizukuStatusCard(state: ShizukuManager.State, message: String) {
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(label, color = Color.White, style = MaterialTheme.typography.titleSmall)
-            if (message.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(message, color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp)
-            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(status.detail, color = Color.White.copy(alpha = 0.92f), fontSize = 12.sp)
         }
     }
 }
 
 @Composable
-fun ServerControlRow(
-    state: ShizukuManager.State,
-    onRequestPermission: () -> Unit,
-    onStart: () -> Unit,
-    onStop: () -> Unit
+fun ProcessControlRow(
+    coreReady: Boolean,
+    onStartNative: () -> Unit,
+    onStop: () -> Unit,
+    onRefreshState: () -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (state == ShizukuManager.State.PERMISSION_DENIED) {
-            Button(
-                onClick = onRequestPermission,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onStartNative,
+                enabled = true,
                 modifier = Modifier
                     .weight(1f)
                     .height(36.dp),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 8.dp,
                     vertical = 4.dp
-                ),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800))
+                )
             ) {
-                Text(tr("Grant Shizuku"))
+                Text(tr("Start Native"), fontSize = 12.sp)
+            }
+            OutlinedButton(
+                onClick = onStop,
+                enabled = coreReady,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(36.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 8.dp,
+                    vertical = 4.dp
+                )
+            ) {
+                Text(tr("Stop"), fontSize = 12.sp)
             }
         }
         OutlinedButton(
-            onClick = onStart,
-            enabled = state == ShizukuManager.State.READY || state == ShizukuManager.State.ERROR,
+            onClick = onRefreshState,
             modifier = Modifier
-                .weight(1f)
-                .height(36.dp),
+                .fillMaxWidth()
+                .height(34.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(
                 horizontal = 8.dp,
                 vertical = 4.dp
             )
         ) {
-            Text(tr("Start"))
+            Text(tr("Refresh Core State"), fontSize = 12.sp)
         }
-        OutlinedButton(
-            onClick = onStop,
-            enabled = state == ShizukuManager.State.RUNNING,
-            modifier = Modifier
-                .weight(1f)
-                .height(36.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                horizontal = 8.dp,
-                vertical = 4.dp
-            )
+    }
+}
+
+@Composable
+fun WirelessBootstrapCard(
+    status: MainViewModel.WirelessBootstrapStatus,
+    onStartGuide: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(tr("Stop"))
+            Text(tr("Wireless bootstrap"), style = MaterialTheme.typography.titleSmall)
+            Text(
+                tr("Wireless ADB bootstrap path (native). Start guide, then submit pairing code from notification."),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                fontSize = 12.sp
+            )
+            Text(
+                "${tr("State")}: ${status.state} | ${status.message}",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                fontSize = 12.sp
+            )
+            OutlinedButton(
+                onClick = onStartGuide,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !status.running
+            ) {
+                Text(tr("Open Developer Options (Start Guide)"), fontSize = 12.sp)
+            }
         }
     }
 }
@@ -1267,7 +1353,7 @@ fun ServerControlRow(
 @Composable
 fun ConfigTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     // simple in-tab navigation:
-    // 0 = overview, 1 = device core server, 2 = PC web_console, 3 = LLM, 4 = unlock policy
+    // 0 = overview, 1 = device core server, 2 = LLM, 3 = unlock policy, 4 = map sync
     var page by rememberSaveable { mutableIntStateOf(0) }
 
     when (page) {
@@ -1275,10 +1361,9 @@ fun ConfigTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
             modifier = modifier,
             viewModel = viewModel,
             onOpenDeviceCore = { page = 1 },
-            onOpenPcConsole = { page = 2 },
-            onOpenLlm = { page = 3 },
-            onOpenUnlockPolicy = { page = 4 },
-            onOpenMapSync = { page = 5 }
+            onOpenLlm = { page = 2 },
+            onOpenUnlockPolicy = { page = 3 },
+            onOpenMapSync = { page = 4 }
         )
         1 -> SingleConfigPage(
             title = tr("Device core server"),
@@ -1288,27 +1373,20 @@ fun ConfigTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
             LxbCoreConfigCard(viewModel)
         }
         2 -> SingleConfigPage(
-            title = tr("PC web_console"),
-            modifier = modifier,
-            onBack = { page = 0 }
-        ) {
-            PcConsoleConfigCard(viewModel)
-        }
-        3 -> SingleConfigPage(
             title = tr("LLM config (device-side)"),
             modifier = modifier,
             onBack = { page = 0 }
         ) {
             LlmConfigCard(viewModel)
         }
-        4 -> SingleConfigPage(
+        3 -> SingleConfigPage(
             title = tr("Unlock & lock policy"),
             modifier = modifier,
             onBack = { page = 0 }
         ) {
             UnlockPolicyConfigCard(viewModel)
         }
-        5 -> SingleConfigPage(
+        4 -> SingleConfigPage(
             title = tr("Map sync & source"),
             modifier = modifier,
             onBack = { page = 0 }
@@ -1380,7 +1458,6 @@ fun ConfigOverviewPage(
     modifier: Modifier = Modifier,
     viewModel: MainViewModel,
     onOpenDeviceCore: () -> Unit,
-    onOpenPcConsole: () -> Unit,
     onOpenLlm: () -> Unit,
     onOpenUnlockPolicy: () -> Unit,
     onOpenMapSync: () -> Unit
@@ -1430,11 +1507,6 @@ fun ConfigOverviewPage(
             title = tr("Device core server"),
             description = tr("TCP port and related options for lxb-core running on this device."),
             onClick = onOpenDeviceCore
-        )
-        ConfigEntryCard(
-            title = tr("PC web_console"),
-            description = tr("IP/port for optional PC-side web_console debugging."),
-            onClick = onOpenPcConsole
         )
         ConfigEntryCard(
             title = tr("LLM config (device-side)"),
@@ -1533,7 +1605,6 @@ fun SingleConfigPage(
 @Composable
 fun LxbCoreConfigCard(viewModel: MainViewModel) {
     val lxbPort by viewModel.lxbPort.collectAsState()
-    val appUpdateResult by viewModel.appUpdateResult.collectAsState()
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -1551,83 +1622,6 @@ fun LxbCoreConfigCard(viewModel: MainViewModel) {
                 supportingText = {
                     Text(
                         tr("TCP port listened by lxb-core on device (default 12345)"),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
-                }
-            )
-            Text(tr("App update"), style = MaterialTheme.typography.titleSmall)
-            Text(
-                tr("Check and open latest GitHub release APK."),
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                fontSize = 12.sp
-            )
-            Text(
-                "${tr("Current app version")}: ${BuildConfig.VERSION_NAME}",
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                fontSize = 12.sp
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { viewModel.checkAppUpdateFromGithub() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(tr("Check latest release"))
-                }
-                OutlinedButton(
-                    onClick = { viewModel.openLatestReleasePage() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(tr("Open releases"))
-                }
-            }
-            if (appUpdateResult.isNotBlank()) {
-                Text(
-                    text = appUpdateResult,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun PcConsoleConfigCard(viewModel: MainViewModel) {
-    val serverIp by viewModel.serverIp.collectAsState()
-    val serverPort by viewModel.serverPort.collectAsState()
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(tr("PC web_console"), style = MaterialTheme.typography.titleSmall)
-            OutlinedTextField(
-                value = serverIp,
-                onValueChange = { viewModel.serverIp.value = it },
-                label = { Text(tr("Server IP")) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = {
-                    Text(
-                        tr("IP address of the PC running web_console"),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
-                }
-            )
-            OutlinedTextField(
-                value = serverPort,
-                onValueChange = { viewModel.serverPort.value = it },
-                label = { Text(tr("Server port")) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = {
-                    Text(
-                        tr("Flask port of web_console (default 5000)"),
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                         fontSize = 12.sp
                     )

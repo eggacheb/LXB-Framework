@@ -1,15 +1,20 @@
 package com.example.lxb_ignition
 
 import android.app.Application
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.lxb_ignition.map.MapSyncManager
 import com.example.lxb_ignition.service.LocalLinkClient
 import com.example.lxb_ignition.service.TaskRuntimeService
-import com.example.lxb_ignition.shizuku.ShizukuManager
+import com.example.lxb_ignition.service.WirelessAdbBootstrapService
+import com.example.lxb_ignition.storage.AppStatePaths
 import com.lxb.server.cortex.LlmClient
 import com.lxb.server.protocol.CommandIds
 import java.net.ServerSocket
@@ -17,6 +22,7 @@ import java.net.SocketTimeoutException
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +33,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.nio.charset.Charset
 import java.util.concurrent.TimeUnit
 
@@ -51,6 +58,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val DEFAULT_MAP_REPO_RAW_BASE_URL = "https://raw.githubusercontent.com/wuwei-crg/LXB-MapRepo/main"
         private const val RELEASE_API_LATEST = "https://api.github.com/repos/wuwei-crg/LXB-Framework/releases/latest"
         private const val RELEASE_WEB_LATEST = "https://github.com/wuwei-crg/LXB-Framework/releases/latest"
+        private const val DEFAULT_LLM_CONFIG_PATH = "/data/local/tmp/lxb-llm-config.json"
 
         // Local TCP port for trace push from lxb-core.
         private const val TRACE_PUSH_PORT = 23456
@@ -71,15 +79,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    val shizukuManager = ShizukuManager(application)
-
-    // Shizuku / lxb-core state
-    private val _state = MutableStateFlow(ShizukuManager.State.UNAVAILABLE)
-    val state: StateFlow<ShizukuManager.State> = _state.asStateFlow()
-
-    private val _statusMessage = MutableStateFlow("Initializing...")
-    val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
     private val _logLines = MutableStateFlow<List<String>>(emptyList())
     val logLines: StateFlow<List<String>> = _logLines.asStateFlow()
@@ -131,6 +130,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var nextMsgId: Long = 1L
     private var activeTraceJob: Job? = null
     private var activeRuntimeTaskId: String = ""
+    private var coreProbeJob: Job? = null
+
+    data class CoreRuntimeStatus(
+        val ready: Boolean = false,
+        val detail: String = "Not connected"
+    )
+
+    private val _coreRuntimeStatus = MutableStateFlow(CoreRuntimeStatus())
+    val coreRuntimeStatus: StateFlow<CoreRuntimeStatus> = _coreRuntimeStatus.asStateFlow()
+
+    data class WirelessBootstrapStatus(
+        val running: Boolean = false,
+        val state: String = "IDLE",
+        val message: String = "Idle"
+    )
+
+    private val _wirelessBootstrapStatus = MutableStateFlow(WirelessBootstrapStatus())
+    val wirelessBootstrapStatus: StateFlow<WirelessBootstrapStatus> = _wirelessBootstrapStatus.asStateFlow()
 
     // Tasks tab: recent task list (lightweight snapshot).
     data class TaskSummary(
@@ -189,20 +206,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
-    private val mapSyncManager = MapSyncManager(application, shizukuManager, httpClient)
+    private val mapSyncManager = MapSyncManager(application, httpClient)
+
+    private val wirelessBootstrapReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != WirelessAdbBootstrapService.ACTION_STATUS) return
+            val state = intent.getStringExtra(WirelessAdbBootstrapService.EXTRA_STATE).orEmpty()
+            val message = intent.getStringExtra(WirelessAdbBootstrapService.EXTRA_MESSAGE).orEmpty()
+            val running = intent.getBooleanExtra(WirelessAdbBootstrapService.EXTRA_RUNNING, false)
+            _wirelessBootstrapStatus.value = WirelessBootstrapStatus(
+                running = running,
+                state = if (state.isNotBlank()) state else _wirelessBootstrapStatus.value.state,
+                message = if (message.isNotBlank()) message else _wirelessBootstrapStatus.value.message
+            )
+        }
+    }
 
     init {
-        shizukuManager.setListener(object : ShizukuManager.Listener {
-            override fun onStateChanged(state: ShizukuManager.State, message: String) {
-                _state.value = state
-                _statusMessage.value = message
-            }
-
-            override fun onLogLine(line: String) {
-                appendLog(line)
-            }
-        })
-        shizukuManager.attach()
+        registerWirelessBootstrapReceiver()
+        startCoreProbeLoop()
         // Migrate stale/invalid port values (e.g., "0") to default.
         persistNormalizedLxbPortIfNeeded()
         // Startup map sync:
@@ -218,27 +240,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // ----- Shizuku / lxb-core operations -----
+    // ----- lxb-core operations -----
 
-    fun requestShizukuPermission() {
-        shizukuManager.requestPermission()
-    }
-
-    fun startServer() {
+    fun startServerWithNative() {
         val port = currentLxbPortOrNull() ?: run {
             appendLog("Invalid lxb-core port")
             appendSystemMessage("Invalid lxb-core port, please check TCP port in Config tab.")
             return
         }
         saveConfig()
-        viewModelScope.launch {
-            shizukuManager.startServer(port)
+        appendLog("[CORE] Native start requested on port $port")
+        sendWirelessBootstrapAction(WirelessAdbBootstrapService.ACTION_START_CORE_NATIVE)
+    }
+
+    fun stopServerProcess() {
+        sendWirelessBootstrapAction(WirelessAdbBootstrapService.ACTION_STOP_CORE_NATIVE)
+    }
+
+    // Backward-compatible aliases used by old UI call sites.
+    fun startServer() = startServerWithNative()
+    fun stopServer() = stopServerProcess()
+
+    fun refreshCoreRuntimeStatusNow() {
+        viewModelScope.launch(Dispatchers.IO) {
+            publishCoreRuntimeStatus(probeCoreHandshakeReady(1500))
         }
     }
 
-    fun stopServer() {
-        viewModelScope.launch {
-            shizukuManager.stopServer()
+    fun startWirelessBootstrapGuide() {
+        sendWirelessBootstrapAction(WirelessAdbBootstrapService.ACTION_START_GUIDE)
+        _wirelessBootstrapStatus.value = _wirelessBootstrapStatus.value.copy(
+            running = true,
+            state = "GUIDE_SETTINGS",
+            message = "Opening Developer Options and starting guide..."
+        )
+    }
+
+    private fun sendWirelessBootstrapAction(action: String) {
+        val app = getApplication<Application>()
+        runCatching {
+            val intent = Intent(app, WirelessAdbBootstrapService::class.java).apply {
+                this.action = action
+            }
+            if (action == WirelessAdbBootstrapService.ACTION_STOP
+                || action == WirelessAdbBootstrapService.ACTION_STOP_CORE_NATIVE
+            ) {
+                app.startService(intent)
+            } else {
+                ContextCompat.startForegroundService(app, intent)
+            }
+        }.onFailure { e ->
+            val msg = "Wireless bootstrap action failed: ${e.message}"
+            appendLog("[WIRELESS_BOOTSTRAP] $msg")
+            _wirelessBootstrapStatus.value = _wirelessBootstrapStatus.value.copy(
+                state = "FAILED",
+                message = msg
+            )
+        }
+    }
+
+    private fun startCoreProbeLoop() {
+        if (coreProbeJob?.isActive == true) return
+        coreProbeJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val ready = probeCoreHandshakeReady(1200)
+                publishCoreRuntimeStatus(ready)
+                delay(2000L)
+            }
+        }
+    }
+
+    private fun probeCoreHandshakeReady(timeoutMs: Int): Boolean {
+        val port = currentLxbPortOrNull() ?: return false
+        return runCatching {
+            LocalLinkClient("127.0.0.1", port, timeoutMs).use { client ->
+                client.handshake(timeoutMs)
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun publishCoreRuntimeStatus(ready: Boolean) {
+        val port = currentLxbPortOrNull() ?: 12345
+        _coreRuntimeStatus.value = if (ready) {
+            CoreRuntimeStatus(
+                ready = true,
+                detail = "Connected (127.0.0.1:$port, handshake ok)"
+            )
+        } else {
+            CoreRuntimeStatus(
+                ready = false,
+                detail = "Disconnected (127.0.0.1:$port)"
+            )
         }
     }
 
@@ -304,9 +397,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeRuntimeTaskId = ""
             updateTaskRuntimeIndicator("SUBMITTING", "Submitting task to device...")
 
-            val running = withContext(Dispatchers.IO) {
-                runCatching { shizukuManager.isServerRunning() }.getOrDefault(false)
-            }
+            val running = withContext(Dispatchers.IO) { probeCoreHandshakeReady(1500) }
             if (!running) {
                 val err = "lxb-core is not running, please start the service on the home tab."
                 sendResult.value = err
@@ -1196,17 +1287,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun syncDeviceLlmConfigFile(): Result<String> {
         val cfgBytes = buildDeviceLlmConfigJson().toByteArray(Charset.forName("UTF-8"))
-        val llmConfigPath = shizukuManager.getLlmConfigPath()
-        val syncResult = withContext(Dispatchers.IO) {
-            shizukuManager.writeConfigFile(llmConfigPath, cfgBytes)
+        val appConfigPath = AppStatePaths.getLlmConfigPath(getApplication())
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                // 1) Always keep one app-side config snapshot for compatibility/debug.
+                val appCfg = File(appConfigPath)
+                appCfg.parentFile?.mkdirs()
+                appCfg.writeBytes(cfgBytes)
+
+                // 2) If core is reachable, sync to the runtime default path used by native bootstrap.
+                val port = currentLxbPortOrNull()
+                if (port != null && probeCoreHandshakeReady(1200)) {
+                    val shellSync = writeLlmConfigViaCoreShell(port, cfgBytes)
+                    if (shellSync.isFailure) {
+                        throw shellSync.exceptionOrNull()
+                            ?: Exception("core shell sync failed")
+                    }
+                    val shellDetail = shellSync.getOrNull().orEmpty()
+                    return@runCatching "app=$appConfigPath; core=$DEFAULT_LLM_CONFIG_PATH; $shellDetail"
+                }
+
+                // Core not running: local snapshot is still useful and will be used by paths that read app state dir.
+                "app=$appConfigPath; core_offline_skip=true"
+            }
         }
-        return if (syncResult.isSuccess) {
-            Result.success(llmConfigPath)
-        } else {
-            Result.failure(
-                syncResult.exceptionOrNull() ?: Exception("Unknown error while syncing config")
-            )
+    }
+
+    private fun writeLlmConfigViaCoreShell(port: Int, cfgBytes: ByteArray): Result<String> {
+        return runCatching {
+            val b64 = Base64.encodeToString(cfgBytes, Base64.NO_WRAP)
+            val tmpB64 = "$DEFAULT_LLM_CONFIG_PATH.b64"
+            val cmd = buildString {
+                append("mkdir -p /data/local/tmp; ")
+                append("echo '").append(b64).append("' > ").append(tmpB64).append("; ")
+                append("(base64 -d ").append(tmpB64).append(" > ").append(DEFAULT_LLM_CONFIG_PATH)
+                append(" || toybox base64 -d ").append(tmpB64).append(" > ").append(DEFAULT_LLM_CONFIG_PATH).append("); ")
+                append("rm -f ").append(tmpB64).append("; ")
+                append("ls -l ").append(DEFAULT_LLM_CONFIG_PATH)
+            }
+
+            val req = org.json.JSONObject()
+                .put("action", "shell_exec")
+                .put("command", cmd)
+                .put("timeout_ms", 6000)
+                .toString()
+                .toByteArray(Charsets.UTF_8)
+
+            LocalLinkClient("127.0.0.1", port, 4000).use { client ->
+                runCatching { client.handshake(2000) }
+                val payload = client.sendCommand(
+                    CommandIds.CMD_SYSTEM_CONTROL,
+                    req,
+                    timeoutMs = 8_000
+                )
+                val parsed = parseSystemControlResponse(payload)
+                if (!parsed.first) {
+                    throw IllegalStateException(parsed.second)
+                }
+                parsed.second
+            }
         }
+    }
+
+    private fun parseSystemControlResponse(payload: ByteArray): Pair<Boolean, String> {
+        if (payload.isEmpty()) {
+            return Pair(false, "empty_response")
+        }
+        if (payload.size < 3) {
+            return Pair(false, "short_response(${payload.size})")
+        }
+        val status = payload[0].toInt() and 0xFF
+        val jsonLen = ((payload[1].toInt() and 0xFF) shl 8) or (payload[2].toInt() and 0xFF)
+        val available = payload.size - 3
+        val safeLen = when {
+            jsonLen <= 0 -> available
+            jsonLen > available -> available
+            else -> jsonLen
+        }
+        val text = String(payload, 3, safeLen, Charsets.UTF_8)
+        val obj = runCatching { org.json.JSONObject(text) }.getOrNull()
+        if (obj == null) {
+            return Pair(status == 1, "invalid_json:${text.take(180)}")
+        }
+        val ok = (status == 1) && obj.optBoolean("ok", false)
+        val detail = buildString {
+            val stdout = obj.optString("stdout", "").trim()
+            val stderr = obj.optString("stderr", "").trim()
+            val err = obj.optString("error", "").trim()
+            if (stdout.isNotEmpty()) append("stdout=").append(stdout.take(200))
+            if (stderr.isNotEmpty()) {
+                if (isNotEmpty()) append(" | ")
+                append("stderr=").append(stderr.take(200))
+            }
+            if (err.isNotEmpty()) {
+                if (isNotEmpty()) append(" | ")
+                append("error=").append(err.take(200))
+            }
+            if (isEmpty()) {
+                append("ok=").append(ok)
+            }
+        }
+        return Pair(ok, detail)
     }
 
     fun syncDeviceConfigOnly() {
@@ -1672,9 +1853,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        shizukuManager.detach()
+        unregisterWirelessBootstrapReceiver()
         activeTraceJob?.cancel()
+        coreProbeJob?.cancel()
         stopTaskRuntimeIndicator()
         httpClient.dispatcher.executorService.shutdown()
+    }
+
+    private fun registerWirelessBootstrapReceiver() {
+        val app = getApplication<Application>()
+        val filter = IntentFilter(WirelessAdbBootstrapService.ACTION_STATUS)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                app.registerReceiver(wirelessBootstrapReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                app.registerReceiver(wirelessBootstrapReceiver, filter)
+            }
+        }.onFailure { e ->
+            appendLog("[WIRELESS_BOOTSTRAP] receiver register failed: ${e.message}")
+        }
+    }
+
+    private fun unregisterWirelessBootstrapReceiver() {
+        val app = getApplication<Application>()
+        runCatching { app.unregisterReceiver(wirelessBootstrapReceiver) }
     }
 }
