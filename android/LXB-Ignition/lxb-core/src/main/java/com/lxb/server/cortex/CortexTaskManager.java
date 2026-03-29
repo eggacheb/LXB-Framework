@@ -574,14 +574,20 @@ public class CortexTaskManager {
     private TaskSessionHooks applyTaskSessionStart(TaskInstance instance, FsmTaskRequest req) {
         TaskSessionHooks hooks = new TaskSessionHooks();
         hooks.recordEnabled = req.recordEnabled;
+        hooks.dndMode = resolveTaskDndMode();
 
-        // Always enable DND at task start (best-effort).
-        try {
-            Map<String, Object> dndArgs = new LinkedHashMap<String, Object>();
-            dndArgs.put("mode", "none");
-            hooks.dndOn = toBool(fsmEngine.runSystemControl(instance.taskId, "dnd_set", dndArgs).get("ok"), false);
-        } catch (Exception ignored) {
-            hooks.dndOn = false;
+        // Apply task-level DND mode based on runtime config (best-effort).
+        if (!"skip".equals(hooks.dndMode)) {
+            try {
+                Map<String, Object> dndArgs = new LinkedHashMap<String, Object>();
+                dndArgs.put("mode", hooks.dndMode);
+                hooks.dndApplied = toBool(
+                        fsmEngine.runSystemControl(instance.taskId, "dnd_set", dndArgs).get("ok"),
+                        false
+                );
+            } catch (Exception ignored) {
+                hooks.dndApplied = false;
+            }
         }
 
         // Recording is schedule-controlled; manual tasks default to off.
@@ -610,12 +616,31 @@ public class CortexTaskManager {
             } catch (Exception ignored) {
             }
         }
-        try {
-            Map<String, Object> dndOff = new LinkedHashMap<String, Object>();
-            dndOff.put("mode", "off");
-            fsmEngine.runSystemControl(instance.taskId, "dnd_set", dndOff);
-        } catch (Exception ignored) {
+        if (hooks != null && !"skip".equals(hooks.dndMode)) {
+            try {
+                Map<String, Object> dndOff = new LinkedHashMap<String, Object>();
+                dndOff.put("mode", "off");
+                fsmEngine.runSystemControl(instance.taskId, "dnd_set", dndOff);
+            } catch (Exception ignored) {
+            }
         }
+    }
+
+    private String resolveTaskDndMode() {
+        try {
+            LlmConfig cfg = LlmConfig.loadDefault();
+            return normalizeTaskDndMode(cfg != null ? cfg.taskDndMode : null);
+        } catch (Exception ignored) {
+            return "none";
+        }
+    }
+
+    private String normalizeTaskDndMode(String raw) {
+        String mode = raw != null ? raw.trim().toLowerCase() : "";
+        if ("skip".equals(mode) || "off".equals(mode) || "none".equals(mode)) {
+            return mode;
+        }
+        return "none";
     }
 
     private static String buildRecordFilePath(String taskId, long startedAtMs) {
@@ -694,7 +719,8 @@ public class CortexTaskManager {
     }
 
     private static class TaskSessionHooks {
-        boolean dndOn;
+        String dndMode;
+        boolean dndApplied;
         boolean recordEnabled;
         boolean recordStarted;
         String recordPath;

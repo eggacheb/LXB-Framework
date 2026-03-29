@@ -129,6 +129,10 @@ fun LXBIgnitionApp(viewModel: MainViewModel = viewModel()) {
         }
     }
 
+    LaunchedEffect(Unit) {
+        viewModel.checkAppUpdateOnLaunch()
+    }
+
     CompositionLocalProvider(LocalUiI18n provides i18n) {
         val tabs = listOf("Control", "Tasks", "Config", "Logs")
         Scaffold(
@@ -387,6 +391,13 @@ private val ZhMap = mapOf(
     "English" to "英文",
     "Chinese" to "中文",
     "Device core server" to "设备端核心服务",
+    "Control mode config" to "操控方式配置",
+    "Core runtime & input" to "Core 运行与输入通道",
+    "Core startup & input compatibility (Important)" to "核心启动与输入兼容（重要）",
+    "If Start Native fails or taps/swipes do not work, open this first." to "如果原生启动失败，或点击/滑动不生效，先看这里。",
+    "Open core service settings" to "打开核心服务配置",
+    "If taps/swipes are not working, adjust compatibility mode here." to "如果点击/滑动不生效，在这里调整兼容模式。",
+    "Open control mode settings" to "打开操控方式配置",
     "TCP port and related options for lxb-core running on this device." to "配置设备端 lxb-core 的 TCP 端口与相关选项。",
     "LLM config (device-side)" to "设备端 LLM 配置",
     "Base URL, API key and model for device-side LLM/VLM calls." to "配置设备端 LLM/VLM 调用的 Base URL、API Key 与模型。",
@@ -403,11 +414,28 @@ private val ZhMap = mapOf(
     "lxb-core server" to "lxb-core 服务",
     "TCP port" to "TCP 端口",
     "TCP port listened by lxb-core on device (default 12345)" to "设备端 lxb-core 监听的 TCP 端口（默认 12345）",
+    "Controls native start endpoint and click/swipe compatibility path." to "配置原生启动端点与点击/滑动兼容路径。",
+    "Configure touch injection mode and compatibility." to "配置触摸注入模式与兼容策略。",
+    "Touch mode profile" to "触摸策略档位",
+    "Choose preferred injection pipeline for tap/swipe/long press." to "为点击/滑动/长按选择优先注入链路。",
+    "Compatibility mode (Shell first)" to "兼容模式（Shell 优先）",
+    "Precision mode (UiAutomation first)" to "精细模式（UiAutomation 优先）",
+    "Task-time Do Not Disturb" to "任务期间免打扰",
+    "Policy applied when a task starts." to "任务启动时应用此策略。",
+    "Keep current DND state" to "不调整免打扰（保持当前状态）",
+    "Set DND to OFF (allow notifications)" to "设置任务期 DND=OFF（允许提醒）",
+    "Set DND to NONE (silence all)" to "设置任务期 DND=NONE（全部静音）",
+    "Touch input mode" to "触摸注入模式",
+    "How taps/swipes are injected to the device." to "控制点击/滑动如何注入到设备。",
+    "Shell input first" to "Shell 优先",
+    "UiAutomation first" to "UiAutomation 优先",
+    "Apply to core" to "应用到 Core",
     "API Base URL" to "API Base URL",
     "API Key" to "API Key",
     "Model" to "模型",
     "Test LLM & sync to device" to "测试 LLM 并同步到设备",
     "Save only" to "仅保存",
+    "Save all config only" to "仅保存（保存所有配置）",
     "Auto unlock before route" to "路由前自动解锁",
     "Check screen state and unlock before app launch/routing." to "在应用启动/路由前检查屏幕状态并执行解锁。",
     "Auto lock after task" to "任务后自动锁屏",
@@ -1429,7 +1457,7 @@ fun WirelessBootstrapCard(
 @Composable
 fun ConfigTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     // simple in-tab navigation:
-    // 0 = overview, 1 = device core server, 2 = LLM, 3 = unlock policy, 4 = map sync
+    // 0 = overview, 1 = control mode config, 2 = LLM, 3 = unlock policy, 4 = map sync
     var page by rememberSaveable { mutableIntStateOf(0) }
 
     when (page) {
@@ -1442,7 +1470,7 @@ fun ConfigTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
             onOpenMapSync = { page = 4 }
         )
         1 -> SingleConfigPage(
-            title = tr("Device core server"),
+            title = tr("Control mode config"),
             modifier = modifier,
             onBack = { page = 0 }
         ) {
@@ -1539,6 +1567,7 @@ fun ConfigOverviewPage(
     onOpenMapSync: () -> Unit
 ) {
     val uiLang by viewModel.uiLang.collectAsState()
+    val coreRuntime by viewModel.coreRuntimeStatus.collectAsState()
     val scrollState = rememberScrollState()
     Column(
         modifier = modifier
@@ -1557,6 +1586,25 @@ fun ConfigOverviewPage(
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
+        ConfigEntryCard(
+            title = tr("Control mode config"),
+            description = tr("If taps/swipes are not working, adjust compatibility mode here."),
+            onClick = onOpenDeviceCore
+        ) {
+            val statusText = if (coreRuntime.ready) tr("Core Connected") else tr("Core Disconnected")
+            Text(
+                text = "${tr("State")}: $statusText",
+                fontSize = 12.sp,
+                color = if (coreRuntime.ready) Color(0xFF2E7D32) else Color(0xFFE65100)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Button(
+                onClick = onOpenDeviceCore,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(tr("Open control mode settings"))
+            }
+        }
         ConfigEntryCard(
             title = tr("Language"),
             description = tr("Language for app UI text."),
@@ -1579,11 +1627,6 @@ fun ConfigOverviewPage(
                 }
             }
         }
-        ConfigEntryCard(
-            title = tr("Device core server"),
-            description = tr("TCP port and related options for lxb-core running on this device."),
-            onClick = onOpenDeviceCore
-        )
         ConfigEntryCard(
             title = tr("LLM config (device-side)"),
             description = tr("Base URL, API key and model for device-side LLM/VLM calls."),
@@ -1681,13 +1724,27 @@ fun SingleConfigPage(
 @Composable
 fun LxbCoreConfigCard(viewModel: MainViewModel) {
     val lxbPort by viewModel.lxbPort.collectAsState()
+    val touchMode by viewModel.touchMode.collectAsState()
+    val taskDndMode by viewModel.taskDndMode.collectAsState()
+    val coreConfigResult by viewModel.coreConfigResult.collectAsState()
+    val coreRuntime by viewModel.coreRuntimeStatus.collectAsState()
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(tr("lxb-core server"), style = MaterialTheme.typography.titleSmall)
+            Text(tr("Control mode config"), style = MaterialTheme.typography.titleSmall)
+            Text(
+                tr("Configure touch injection mode and compatibility."),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                fontSize = 12.sp
+            )
+            Text(
+                text = "${tr("State")}: ${if (coreRuntime.ready) tr("Core Connected") else tr("Core Disconnected")}",
+                fontSize = 12.sp,
+                color = if (coreRuntime.ready) Color(0xFF2E7D32) else Color(0xFFE65100)
+            )
             OutlinedTextField(
                 value = lxbPort,
                 onValueChange = { viewModel.lxbPort.value = it },
@@ -1703,6 +1760,109 @@ fun LxbCoreConfigCard(viewModel: MainViewModel) {
                     )
                 }
             )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(tr("Touch mode profile"), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        tr("Choose preferred injection pipeline for tap/swipe/long press."),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ModeChoiceButton(
+                    text = tr("Compatibility mode (Shell first)"),
+                    selected = touchMode == MainViewModel.TOUCH_MODE_SHELL,
+                    onClick = { viewModel.setTouchMode(MainViewModel.TOUCH_MODE_SHELL) }
+                )
+                ModeChoiceButton(
+                    text = tr("Precision mode (UiAutomation first)"),
+                    selected = touchMode == MainViewModel.TOUCH_MODE_UIAUTOMATION,
+                    onClick = { viewModel.setTouchMode(MainViewModel.TOUCH_MODE_UIAUTOMATION) }
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(tr("Task-time Do Not Disturb"), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        tr("Policy applied when a task starts."),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ModeChoiceButton(
+                    text = tr("Keep current DND state"),
+                    selected = taskDndMode == MainViewModel.TASK_DND_MODE_SKIP,
+                    onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_SKIP) }
+                )
+                ModeChoiceButton(
+                    text = tr("Set DND to OFF (allow notifications)"),
+                    selected = taskDndMode == MainViewModel.TASK_DND_MODE_OFF,
+                    onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_OFF) }
+                )
+                ModeChoiceButton(
+                    text = tr("Set DND to NONE (silence all)"),
+                    selected = taskDndMode == MainViewModel.TASK_DND_MODE_NONE,
+                    onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_NONE) }
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { viewModel.applyTouchModeToCore() },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(tr("Apply to core"))
+                }
+                OutlinedButton(
+                    onClick = { viewModel.saveConfig() },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(tr("Save all config only"))
+                }
+            }
+            if (coreConfigResult.isNotEmpty()) {
+                Text(
+                    text = coreConfigResult,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModeChoiceButton(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(
+            onClick = onClick,
+            enabled = false,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text)
         }
     }
 }

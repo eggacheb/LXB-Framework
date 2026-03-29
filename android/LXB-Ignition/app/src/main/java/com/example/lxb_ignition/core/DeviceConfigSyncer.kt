@@ -15,7 +15,8 @@ data class DeviceLlmSettings(
     val autoLockAfterTask: Boolean,
     val unlockPin: String,
     val useMap: Boolean,
-    val mapSource: String
+    val mapSource: String,
+    val taskDndMode: String
 )
 
 class DeviceConfigSyncer(
@@ -33,6 +34,7 @@ class DeviceConfigSyncer(
             .put("unlock_pin", settings.unlockPin.trim())
             .put("use_map", settings.useMap)
             .put("map_source", settings.mapSource)
+            .put("task_dnd_mode", settings.taskDndMode)
             .toString()
     }
 

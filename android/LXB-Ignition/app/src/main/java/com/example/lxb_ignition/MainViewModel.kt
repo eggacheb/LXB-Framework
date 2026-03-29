@@ -65,6 +65,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Legacy key migration only (v0.4.0 and earlier).
         private const val KEY_MAP_DEBUG_LOCAL_OVERRIDE = "map_debug_local_override"
         private const val KEY_UI_LANG = "ui_lang"
+        private const val KEY_TOUCH_MODE = "touch_mode"
+        private const val KEY_TASK_DND_MODE = "task_dnd_mode"
         private const val DEFAULT_MAP_REPO_RAW_BASE_URL = "https://raw.githubusercontent.com/wuwei-crg/LXB-MapRepo/main"
         private const val RELEASE_API_LATEST = "https://api.github.com/repos/wuwei-crg/LXB-Framework/releases/latest"
         private const val RELEASE_WEB_LATEST = "https://github.com/wuwei-crg/LXB-Framework/releases/latest"
@@ -76,6 +78,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val REPEAT_ONCE = "once"
         const val REPEAT_DAILY = "daily"
         const val REPEAT_WEEKLY = "weekly"
+        const val TOUCH_MODE_SHELL = "shell"
+        const val TOUCH_MODE_UIAUTOMATION = "uiautomation"
+        const val TASK_DND_MODE_SKIP = "skip"
+        const val TASK_DND_MODE_OFF = "off"
+        const val TASK_DND_MODE_NONE = "none"
 
         private fun normalizePortString(raw: String?): String {
             val p = raw?.trim()?.toIntOrNull() ?: return DEFAULT_LXB_PORT
@@ -94,6 +101,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 "candidate", "candidates" -> "candidate"
                 "burn" -> "burn"
                 else -> "stable"
+            }
+        }
+
+        private fun normalizeTouchMode(raw: String?): String {
+            val v = raw?.trim()?.lowercase() ?: TOUCH_MODE_SHELL
+            return if (v == TOUCH_MODE_UIAUTOMATION || v == "uiauto") {
+                TOUCH_MODE_UIAUTOMATION
+            } else {
+                TOUCH_MODE_SHELL
+            }
+        }
+
+        private fun normalizeTaskDndMode(raw: String?): String {
+            val v = raw?.trim()?.lowercase() ?: TASK_DND_MODE_NONE
+            return when (v) {
+                TASK_DND_MODE_SKIP -> TASK_DND_MODE_SKIP
+                TASK_DND_MODE_OFF -> TASK_DND_MODE_OFF
+                TASK_DND_MODE_NONE -> TASK_DND_MODE_NONE
+                else -> TASK_DND_MODE_NONE
             }
         }
     }
@@ -136,9 +162,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val mapTargetPackage = MutableStateFlow("")
     val mapTargetId = MutableStateFlow("")
     val llmTestResult = MutableStateFlow("")
+    val coreConfigResult = MutableStateFlow("")
     val mapSyncResult = MutableStateFlow("")
     val appUpdateResult = MutableStateFlow("")
     val uiLang = MutableStateFlow(normalizeUiLang(prefs.getString(KEY_UI_LANG, "en")))
+    val touchMode = MutableStateFlow(normalizeTouchMode(prefs.getString(KEY_TOUCH_MODE, TOUCH_MODE_SHELL)))
+    val taskDndMode = MutableStateFlow(normalizeTaskDndMode(prefs.getString(KEY_TASK_DND_MODE, TASK_DND_MODE_NONE)))
 
     // Control tab
     val requirement = MutableStateFlow("")
@@ -158,6 +187,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
     private var nextMsgId: Long = 1L
     private var coreProbeJob: Job? = null
+    private var updateCheckedOnLaunch = false
 
     private val runtimeController by lazy {
         TaskRuntimeController(
@@ -720,7 +750,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             autoLockAfterTask = autoLockAfterTask.value,
             unlockPin = unlockPin.value,
             useMap = useMap.value,
-            mapSource = mapSource.value
+            mapSource = mapSource.value,
+            taskDndMode = taskDndMode.value
         )
     }
 
@@ -828,8 +859,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkAppUpdateFromGithub() {
+        runUpdateCheck(openTarget = true, showProgress = true, notifyWhenUpToDate = true)
+    }
+
+    fun checkAppUpdateOnLaunch() {
+        if (updateCheckedOnLaunch) return
+        updateCheckedOnLaunch = true
+        runUpdateCheck(openTarget = false, showProgress = false, notifyWhenUpToDate = false)
+    }
+
+    private fun runUpdateCheck(
+        openTarget: Boolean,
+        showProgress: Boolean,
+        notifyWhenUpToDate: Boolean
+    ) {
         viewModelScope.launch {
-            appUpdateResult.value = "Checking latest release..."
+            if (showProgress) {
+                appUpdateResult.value = "Checking latest release..."
+            }
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val request = Request.Builder()
@@ -851,18 +898,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }.getOrElse { e -> Pair("Update check failed: ${e.message}", "") }
             }
-            val msg = result.first
+            var msg = result.first
             val url = result.second
-            if (url.isNotBlank()) {
+            if (openTarget && url.isNotBlank()) {
                 openUrl(url)
+            } else if (!openTarget && url.isNotBlank()) {
+                msg = "New version found. Tap \"Check update\" to open download/release page."
             }
-            appUpdateResult.value = msg
+
+            val isUpToDate = msg.startsWith("Already up to date")
+            val shouldNotify = url.isNotBlank() || !isUpToDate || notifyWhenUpToDate
+            if (shouldNotify) {
+                appUpdateResult.value = msg
+            }
             appendLog("[UPDATE] $msg")
         }
     }
 
     fun openLatestReleasePage() {
         openUrl(RELEASE_WEB_LATEST)
+    }
+
+    fun setTouchMode(mode: String) {
+        touchMode.value = normalizeTouchMode(mode)
+    }
+
+    fun setTaskDndMode(mode: String) {
+        taskDndMode.value = normalizeTaskDndMode(mode)
+    }
+
+    fun applyTouchModeToCore() {
+        val port = currentLxbPortOrNull() ?: run {
+            val msg = "Invalid lxb-core port, cannot apply touch mode."
+            coreConfigResult.value = msg
+            appendLog("[CORE] $msg")
+            return
+        }
+        saveConfig()
+        val selected = normalizeTouchMode(touchMode.value)
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    coreClientGateway.withClient(port = port) { client ->
+                        val modeByte: Byte = if (selected == TOUCH_MODE_SHELL) 1 else 0
+                        val resp = client.sendCommand(
+                            CommandIds.CMD_SET_TOUCH_MODE,
+                            byteArrayOf(modeByte),
+                            timeoutMs = 3_000
+                        )
+                        val ok = resp.isNotEmpty() && resp[0].toInt() != 0
+                        if (!ok) {
+                            throw RuntimeException("core rejected touch mode")
+                        }
+                        val touchMsg = if (selected == TOUCH_MODE_SHELL) {
+                            "shell_first"
+                        } else {
+                            "uiautomation_first"
+                        }
+                        val sync = syncDeviceLlmConfigFile()
+                        if (sync.isFailure) {
+                            throw RuntimeException("touch=$touchMsg; config_sync_failed=${sync.exceptionOrNull()?.message}")
+                        }
+                        val syncMsg = sync.getOrNull().orEmpty()
+                        "Control mode applied: touch=$touchMsg; config=$syncMsg"
+                    }
+                }.getOrElse { e -> "Touch mode apply failed: ${e.message}" }
+            }
+            coreConfigResult.value = result
+            appendLog("[CORE] $result")
+        }
     }
 
     private fun openUrl(url: String) {
@@ -905,6 +1009,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .putString(KEY_MAP_REPO_RAW_BASE_URL, mapRepoRawBaseUrl.value)
             .putString(KEY_MAP_SOURCE, normalizeMapSource(mapSource.value))
             .putString(KEY_UI_LANG, normalizedLang)
+            .putString(KEY_TOUCH_MODE, normalizeTouchMode(touchMode.value))
+            .putString(KEY_TASK_DND_MODE, normalizeTaskDndMode(taskDndMode.value))
             .apply()
     }
 

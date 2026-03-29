@@ -20,7 +20,8 @@ import java.util.Map;
  *   "auto_lock_after_task": true,
  *   "unlock_pin": "1234",
  *   "use_map": true,
- *   "map_source": "stable"
+ *   "map_source": "stable",
+ *   "task_dnd_mode": "none"
  * }
  */
 public class LlmConfig {
@@ -35,9 +36,10 @@ public class LlmConfig {
     public final String unlockPin;
     public final boolean useMap;
     public final String mapSource;
+    public final String taskDndMode;
 
     public LlmConfig(String apiBaseUrl, String apiKey, String model) {
-        this(apiBaseUrl, apiKey, model, true, true, "", true, "stable");
+        this(apiBaseUrl, apiKey, model, true, true, "", true, "stable", "none");
     }
 
     public LlmConfig(
@@ -48,7 +50,8 @@ public class LlmConfig {
             boolean autoLockAfterTask,
             String unlockPin,
             boolean useMap,
-            String mapSource
+            String mapSource,
+            String taskDndMode
     ) {
         this.apiBaseUrl = apiBaseUrl;
         this.apiKey = apiKey;
@@ -58,6 +61,7 @@ public class LlmConfig {
         this.unlockPin = unlockPin != null ? unlockPin : "";
         this.useMap = useMap;
         this.mapSource = normalizeMapSource(mapSource);
+        this.taskDndMode = normalizeTaskDndMode(taskDndMode);
     }
 
     public static LlmConfig loadDefault() throws Exception {
@@ -86,6 +90,7 @@ public class LlmConfig {
         String unlockPin = stringOrEmpty(obj.get("unlock_pin"));
         boolean useMap = parseBool(obj.get("use_map"), true);
         String mapSource = normalizeMapSource(stringOrEmpty(obj.get("map_source")));
+        String taskDndMode = normalizeTaskDndMode(stringOrEmpty(obj.get("task_dnd_mode")));
 
         if (baseUrl.isEmpty() || model.isEmpty()) {
             throw new IllegalStateException("LLM config missing api_base_url or model");
@@ -99,7 +104,8 @@ public class LlmConfig {
                 autoLockAfterTask,
                 unlockPin,
                 useMap,
-                mapSource
+                mapSource,
+                taskDndMode
         );
     }
 
@@ -136,6 +142,20 @@ public class LlmConfig {
             return s;
         }
         return "stable";
+    }
+
+    private static String normalizeTaskDndMode(String raw) {
+        String s = raw == null ? "" : raw.trim().toLowerCase();
+        if ("skip".equals(s)) {
+            return "skip";
+        }
+        if ("off".equals(s)) {
+            return "off";
+        }
+        if ("none".equals(s)) {
+            return "none";
+        }
+        return "none";
     }
 
     private static byte[] readAllBytes(File f) throws Exception {
