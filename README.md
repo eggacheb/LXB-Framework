@@ -33,15 +33,21 @@
 
 ## 快速开始
 
-1. **开启无线调试**：进入手机「设置 → 开发者选项」，打开「无线调试」。
-2. **安装 APK**：从 [Releases](https://github.com/wuwei-crg/LXB-Framework/releases) 下载最新版 `lxb-ignition-vX.Y.Z.apk` 并安装。
-3. **配对设备**：打开 LXB-Ignition，按照 App 内引导完成配对。手机屏幕上会显示一个六位配对码，在 App 弹出的通知栏中输入即可完成首次配对，后续启动会自动重连。
-4. **启动守护进程**：配对成功后，App 自动将后端 DEX 推送到设备并通过 `app_process` 启动守护进程。界面状态指示变为**运行中**即表示就绪。
-5. **配置模型接口**：进入 `Config` 页签，填写：
+1. **开启开发者选项与调试开关**：
+   - 进入手机「设置 → 开发者选项」，打开「USB 调试」和「无线调试」。
+   - **必须开启 USB 调试，否则进程无法保活**。
+2. **按机型检查开发者选项限制**（部分 ROM 必做）：
+   - **MIUI / HyperOS（小米、POCO）**：开启「USB 调试（安全设置）」。注意这和「USB 调试」是两个分开的选项。
+   - **ColorOS（OPPO / OnePlus）**：关闭「权限监控」。
+   - **Flyme（魅族）**：关闭「Flyme 支付保护」。
+3. **安装 APK**：从 [Releases](https://github.com/wuwei-crg/LXB-Framework/releases) 下载最新版 `lxb-ignition-vX.Y.Z.apk` 并安装。
+4. **配对设备**：打开 LXB-Ignition，按照 App 内引导完成配对。手机屏幕上会显示一个六位配对码，在 App 弹出的通知栏中输入即可完成首次配对，后续启动会自动重连。
+5. **启动守护进程**：配对成功后，App 自动将后端 DEX 推送到设备并通过 `app_process` 启动守护进程。界面状态指示变为**运行中**即表示就绪。
+6. **配置模型接口**：进入 `Config` 页签，填写：
    - **API Base URL** — 模型接口地址（兼容 OpenAI 格式）
    - **API Key** — 对应的密钥
    - **Model** — 模型名称，如 `gpt-4o-mini`、`qwen-plus`
-6. **（可选）同步地图**：在 `Config` 中配置 MapRepo 地址，启用后框架会自动拉取稳定地图。未配置时降级为纯视觉模式。
+7. **（可选）同步地图**：在 `Config` 中配置 MapRepo 地址，启用后框架会自动拉取稳定地图。未配置时降级为纯视觉模式。
 
 ## 运行第一个任务
 
