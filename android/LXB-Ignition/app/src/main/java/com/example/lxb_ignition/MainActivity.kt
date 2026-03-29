@@ -425,6 +425,8 @@ private val ZhMap = mapOf(
     "Keep current DND state" to "不调整免打扰（保持当前状态）",
     "Set DND to OFF (allow notifications)" to "设置任务期 DND=OFF（允许提醒）",
     "Set DND to NONE (silence all)" to "设置任务期 DND=NONE（全部静音）",
+    "Shell" to "Shell",
+    "UIAutomator" to "UIAutomator",
     "Touch input mode" to "触摸注入模式",
     "How taps/swipes are injected to the device." to "控制点击/滑动如何注入到设备。",
     "Shell input first" to "Shell 优先",
@@ -1729,115 +1731,132 @@ fun LxbCoreConfigCard(viewModel: MainViewModel) {
     val coreConfigResult by viewModel.coreConfigResult.collectAsState()
     val coreRuntime by viewModel.coreRuntimeStatus.collectAsState()
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(tr("Control mode config"), style = MaterialTheme.typography.titleSmall)
-            Text(
-                tr("Configure touch injection mode and compatibility."),
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                fontSize = 12.sp
-            )
-            Text(
-                text = "${tr("State")}: ${if (coreRuntime.ready) tr("Core Connected") else tr("Core Disconnected")}",
-                fontSize = 12.sp,
-                color = if (coreRuntime.ready) Color(0xFF2E7D32) else Color(0xFFE65100)
-            )
-            OutlinedTextField(
-                value = lxbPort,
-                onValueChange = { viewModel.lxbPort.value = it },
-                label = { Text(tr("TCP port")) },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                supportingText = {
-                    Text(
-                        tr("TCP port listened by lxb-core on device (default 12345)"),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
-                }
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(tr("Touch mode profile"), style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        tr("Choose preferred injection pipeline for tap/swipe/long press."),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
-                }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ModeChoiceButton(
-                    text = tr("Compatibility mode (Shell first)"),
-                    selected = touchMode == MainViewModel.TOUCH_MODE_SHELL,
-                    onClick = { viewModel.setTouchMode(MainViewModel.TOUCH_MODE_SHELL) }
-                )
-                ModeChoiceButton(
-                    text = tr("Precision mode (UiAutomation first)"),
-                    selected = touchMode == MainViewModel.TOUCH_MODE_UIAUTOMATION,
-                    onClick = { viewModel.setTouchMode(MainViewModel.TOUCH_MODE_UIAUTOMATION) }
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(tr("Task-time Do Not Disturb"), style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        tr("Policy applied when a task starts."),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
-                }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                ModeChoiceButton(
-                    text = tr("Keep current DND state"),
-                    selected = taskDndMode == MainViewModel.TASK_DND_MODE_SKIP,
-                    onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_SKIP) }
-                )
-                ModeChoiceButton(
-                    text = tr("Set DND to OFF (allow notifications)"),
-                    selected = taskDndMode == MainViewModel.TASK_DND_MODE_OFF,
-                    onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_OFF) }
-                )
-                ModeChoiceButton(
-                    text = tr("Set DND to NONE (silence all)"),
-                    selected = taskDndMode == MainViewModel.TASK_DND_MODE_NONE,
-                    onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_NONE) }
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { viewModel.applyTouchModeToCore() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(tr("Apply to core"))
-                }
-                OutlinedButton(
-                    onClick = { viewModel.saveConfig() },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(tr("Save all config only"))
-                }
-            }
-            if (coreConfigResult.isNotEmpty()) {
+                Text(tr("Control mode config"), style = MaterialTheme.typography.titleSmall)
                 Text(
-                    text = coreConfigResult,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    tr("Configure touch injection mode and compatibility."),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    fontSize = 12.sp
                 )
+                Text(
+                    text = "${tr("State")}: ${if (coreRuntime.ready) tr("Core Connected") else tr("Core Disconnected")}",
+                    fontSize = 12.sp,
+                    color = if (coreRuntime.ready) Color(0xFF2E7D32) else Color(0xFFE65100)
+                )
+                OutlinedTextField(
+                    value = lxbPort,
+                    onValueChange = { viewModel.lxbPort.value = it },
+                    label = { Text(tr("TCP port")) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    supportingText = {
+                        Text(
+                            tr("TCP port listened by lxb-core on device (default 12345)"),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            fontSize = 12.sp
+                        )
+                    }
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(tr("Touch input mode"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("How taps/swipes are injected to the device."),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    fontSize = 12.sp
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ModeChoiceButton(
+                        text = tr("Shell"),
+                        selected = touchMode == MainViewModel.TOUCH_MODE_SHELL,
+                        onClick = { viewModel.setTouchMode(MainViewModel.TOUCH_MODE_SHELL) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    ModeChoiceButton(
+                        text = tr("UIAutomator"),
+                        selected = touchMode == MainViewModel.TOUCH_MODE_UIAUTOMATION,
+                        onClick = { viewModel.setTouchMode(MainViewModel.TOUCH_MODE_UIAUTOMATION) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(tr("Task-time Do Not Disturb"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("Policy applied when a task starts."),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    fontSize = 12.sp
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModeChoiceButton(
+                        text = tr("Keep current DND state"),
+                        selected = taskDndMode == MainViewModel.TASK_DND_MODE_SKIP,
+                        onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_SKIP) }
+                    )
+                    ModeChoiceButton(
+                        text = tr("Set DND to OFF (allow notifications)"),
+                        selected = taskDndMode == MainViewModel.TASK_DND_MODE_OFF,
+                        onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_OFF) }
+                    )
+                    ModeChoiceButton(
+                        text = tr("Set DND to NONE (silence all)"),
+                        selected = taskDndMode == MainViewModel.TASK_DND_MODE_NONE,
+                        onClick = { viewModel.setTaskDndMode(MainViewModel.TASK_DND_MODE_NONE) }
+                    )
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.applyTouchModeToCore() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(tr("Apply to core"))
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.saveConfig() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(tr("Save all config only"))
+                    }
+                }
+                if (coreConfigResult.isNotEmpty()) {
+                    Text(
+                        text = coreConfigResult,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    )
+                }
             }
         }
     }
@@ -1847,20 +1866,21 @@ fun LxbCoreConfigCard(viewModel: MainViewModel) {
 private fun ModeChoiceButton(
     text: String,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     if (selected) {
         Button(
             onClick = onClick,
             enabled = false,
-            modifier = Modifier.fillMaxWidth()
+            modifier = modifier
         ) {
             Text(text)
         }
     } else {
         OutlinedButton(
             onClick = onClick,
-            modifier = Modifier.fillMaxWidth()
+            modifier = modifier
         ) {
             Text(text)
         }
