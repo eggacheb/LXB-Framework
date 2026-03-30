@@ -35,3 +35,29 @@ data class ScheduleSummary(
     val createdAt: Long,
     val userPlaybook: String
 )
+
+data class ScriptSummary(
+    val scriptKey: String,
+    val userTask: String,
+    val packageName: String,
+    val packageLabel: String,
+    val targetPage: String,
+    val stepCount: Int,
+    val createdAt: Long
+)
+
+data class ScriptStepInfo(
+    val index: Int,
+    val op: String,
+    val args: List<String>,
+    val raw: String,
+    val delayBefore: Int
+)
+
+data class ScriptDetail(
+    val scriptKey: String,
+    val userTask: String,
+    val packageName: String,
+    val packageLabel: String,
+    val steps: List<ScriptStepInfo>
+)

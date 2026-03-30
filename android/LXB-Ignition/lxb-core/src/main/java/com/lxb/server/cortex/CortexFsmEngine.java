@@ -195,6 +195,71 @@ public class CortexFsmEngine {
         this.mapPlanner = new MapPromptPlanner(llmClient);
     }
 
+    public ExecutionEngine getExecution() { return execution; }
+    public PerceptionEngine getPerception() { return perception; }
+    public TraceLogger getTrace() { return trace; }
+
+    /**
+     * Probe screen dimensions from PerceptionEngine (for ScriptReplayEngine).
+     * Returns int[]{width, height}. Falls back to {0, 0} on failure.
+     */
+    public int[] probeScreenSize() {
+        try {
+            byte[] resp = perception != null ? perception.handleGetScreenSize() : null;
+            if (resp != null && resp.length >= 5) {
+                ByteBuffer buf = ByteBuffer.wrap(resp).order(ByteOrder.BIG_ENDIAN);
+                byte status = buf.get();
+                if (status != 0) {
+                    int w = buf.getShort() & 0xFFFF;
+                    int h = buf.getShort() & 0xFFFF;
+                    return new int[]{w, h};
+                }
+            }
+        } catch (Exception ignored) {}
+        return new int[]{0, 0};
+    }
+
+    /**
+     * Go HOME and force-stop the given package. Called by CortexTaskManager
+     * after script replay success to mirror safeResetToHomeAndStopApp behavior.
+     */
+    public void goHomeAndStopApp(String taskId, String packageName) {
+        try {
+            ByteBuffer buf = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN);
+            buf.put((byte) KEYCODE_HOME);
+            buf.put((byte) 2); // CLICK
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", taskId);
+            trace.event("script_replay_go_home", ev);
+            execution.handleKeyEvent(buf.array());
+        } catch (Exception e) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", taskId);
+            ev.put("err", String.valueOf(e));
+            trace.event("script_replay_go_home_error", ev);
+        }
+        if (packageName != null && !packageName.trim().isEmpty()) {
+            String pkg = packageName.trim();
+            try {
+                byte[] pkgBytes = pkg.getBytes(StandardCharsets.UTF_8);
+                ByteBuffer buf = ByteBuffer.allocate(2 + pkgBytes.length).order(ByteOrder.BIG_ENDIAN);
+                buf.putShort((short) pkgBytes.length);
+                buf.put(pkgBytes);
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", taskId);
+                ev.put("package", pkg);
+                trace.event("script_replay_stop_app", ev);
+                execution.handleStopApp(buf.array());
+            } catch (Exception e) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("task_id", taskId);
+                ev.put("package", pkg);
+                ev.put("err", String.valueOf(e));
+                trace.event("script_replay_stop_app_error", ev);
+            }
+        }
+    }
+
     /**
      * Expose a thin system_control wrapper so TaskManager can run task-level
      * lifecycle hooks (e.g., DND/recording) without changing FSM state flow.
@@ -514,6 +579,11 @@ public class CortexFsmEngine {
             ctx.currentSubTaskIndex = -1;
             ctx.currentSubTaskIsLast = false;
             tryAutoLockAfterTask(ctx, finalState);
+
+            Map<String, Object> terminalEv = new LinkedHashMap<>();
+            terminalEv.put("task_id", ctx.taskId);
+            terminalEv.put("state", finalState.name());
+            trace.event("fsm_state_enter", terminalEv);
 
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("status", finalState == State.FINISH ? "success" : "failed");

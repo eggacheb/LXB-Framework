@@ -1,4 +1,4 @@
-﻿package com.example.lxb_ignition
+package com.example.lxb_ignition
 
 import android.Manifest
 import android.app.DatePickerDialog
@@ -21,13 +21,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -51,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -69,6 +74,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.lxb_ignition.model.CoreRuntimeStatus
 import com.example.lxb_ignition.model.ScheduleSummary
+import com.example.lxb_ignition.model.ScriptSummary
 import com.example.lxb_ignition.model.TaskSummary
 import com.example.lxb_ignition.model.TaskRuntimeUiStatus
 import com.example.lxb_ignition.model.WirelessBootstrapStatus
@@ -513,6 +519,7 @@ private val ZhMap = mapOf(
 fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val tasks by viewModel.taskList.collectAsState()
     val schedules by viewModel.scheduleList.collectAsState()
+    val scripts by viewModel.scriptList.collectAsState()
     val taskRuntime by viewModel.taskRuntimeUiStatus.collectAsState()
     val scheduleName by viewModel.scheduleName.collectAsState()
     val scheduleTask by viewModel.scheduleTask.collectAsState()
@@ -522,13 +529,36 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val schedulePackage by viewModel.schedulePackage.collectAsState()
     val schedulePlaybook by viewModel.schedulePlaybook.collectAsState()
     val scheduleRecordEnabled by viewModel.scheduleRecordEnabled.collectAsState()
+    val showSaveDialog by viewModel.showSaveScriptDialog.collectAsState()
+    val lastCompletedTaskId by viewModel.lastCompletedTaskId.collectAsState()
     var page by rememberSaveable { mutableIntStateOf(0) }
     var editingScheduleId by rememberSaveable { mutableStateOf("") }
     var selectedTask by remember { mutableStateOf<TaskSummary?>(null) }
 
+    if (showSaveDialog && lastCompletedTaskId.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissSaveScriptDialog() },
+            title = { Text(tr("Save as Script?")) },
+            text = {
+                Text(tr("Task completed successfully. Save the operation steps as a replay script? Future runs of the same task will try the script first (no AI needed)."))
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.exportScript(lastCompletedTaskId)
+                }) { Text(tr("Save")) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    viewModel.dismissSaveScriptDialog()
+                }) { Text(tr("Skip")) }
+            }
+        )
+    }
+
     LaunchedEffect(Unit) {
         viewModel.refreshScheduleListOnDevice()
         viewModel.refreshTaskListOnDevice()
+        viewModel.refreshScriptList()
     }
 
     when (page) {
@@ -549,6 +579,7 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                         onClick = {
                             viewModel.refreshScheduleListOnDevice()
                             viewModel.refreshTaskListOnDevice()
+                            viewModel.refreshScriptList()
                         },
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             horizontal = 8.dp,
@@ -593,6 +624,24 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                         Text(tr("Recent Runs"), style = MaterialTheme.typography.bodyMedium)
                         Text(
                             text = "View recent execution records. (${tasks.size})",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                        )
+                    }
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    onClick = { page = 4 }
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(tr("Scripts"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "Saved replay scripts (no AI needed). (${scripts.size})",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
                         )
@@ -751,6 +800,110 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                         ) {
                             items(tasks, key = { it.taskId }) { task ->
                                 TaskRow(task = task, onClick = { selectedTask = task })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        4 -> {
+            val scriptListState = rememberLazyListState()
+            var confirmDeleteKey by rememberSaveable { mutableStateOf("") }
+            val scriptDetail by viewModel.currentScriptDetail.collectAsState()
+
+            if (confirmDeleteKey.isNotEmpty()) {
+                AlertDialog(
+                    onDismissRequest = { confirmDeleteKey = "" },
+                    title = { Text(tr("Delete Script?")) },
+                    text = { Text("${tr("Delete script")} $confirmDeleteKey?") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            viewModel.deleteScript(confirmDeleteKey)
+                            confirmDeleteKey = ""
+                        }) { Text(tr("Delete"), color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmDeleteKey = "" }) { Text(tr("Cancel")) }
+                    }
+                )
+            }
+
+            val detail = scriptDetail
+            if (detail != null) {
+                ScriptDetailDialog(
+                    detail = detail,
+                    onDismiss = { viewModel.clearScriptDetail() },
+                    onSaveDelays = { delays ->
+                        viewModel.updateScriptStepDelays(detail.scriptKey, delays)
+                    }
+                )
+            }
+
+            Column(
+                modifier = modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { page = 0 },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text(tr("Back"), fontSize = 12.sp)
+                    }
+                    Text(
+                        text = tr("Scripts"),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(top = 6.dp)
+                    )
+                    OutlinedButton(
+                        onClick = { viewModel.refreshScriptList() },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text(tr("Refresh"), fontSize = 12.sp)
+                    }
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    if (scripts.isEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = tr("No scripts yet. Complete a task successfully, then save it as a script."),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            state = scriptListState,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(scripts, key = { it.scriptKey }) { script ->
+                                ScriptRow(
+                                    script = script,
+                                    onClick = { viewModel.loadScriptDetail(script.scriptKey) },
+                                    onDelete = { confirmDeleteKey = script.scriptKey }
+                                )
                             }
                         }
                     }
@@ -1015,7 +1168,7 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     if (detail != null) {
         AlertDialog(
             onDismissRequest = { selectedTask = null },
-            title = { Text("Task Details") },
+            title = { Text(tr("Task Details")) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (detail.taskSummary.isNotBlank()) {
@@ -1025,7 +1178,7 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                         )
                     } else {
                         Text(
-                            text = "No task summary available yet.",
+                            text = tr("No task summary available yet."),
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
@@ -1067,8 +1220,18 @@ fun TasksTab(viewModel: MainViewModel, modifier: Modifier = Modifier) {
                 }
             },
             confirmButton = {
-                OutlinedButton(onClick = { selectedTask = null }) {
-                    Text(tr("Close"))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (detail.state == "COMPLETED") {
+                        TextButton(onClick = {
+                            viewModel.exportScript(detail.taskId)
+                            selectedTask = null
+                        }) {
+                            Text(tr("Save as Script"), color = Color(0xFF4CAF50))
+                        }
+                    }
+                    OutlinedButton(onClick = { selectedTask = null }) {
+                        Text(tr("Close"))
+                    }
                 }
             }
         )
@@ -1175,6 +1338,218 @@ fun TaskRow(task: TaskSummary, onClick: () -> Unit) {
                     fontSize = 10.sp,
                     color = scheme.error
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun ScriptRow(script: ScriptSummary, onClick: () -> Unit, onDelete: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = scheme.surfaceVariant),
+        onClick = onClick
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Text(
+                text = if (script.userTask.isNotEmpty()) script.userTask else "(no description)",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            val detail = buildString {
+                val app = script.packageLabel.ifEmpty { script.packageName }
+                if (app.isNotEmpty()) append(app)
+                append(" | ${script.stepCount} steps")
+                if (script.createdAt > 0L) {
+                    append(" | ")
+                    append(
+                        SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                            .format(Date(script.createdAt))
+                    )
+                }
+            }
+            Text(
+                text = detail,
+                fontSize = 11.sp,
+                color = scheme.onSurface.copy(alpha = 0.75f)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = tr("Tap to view steps"),
+                    fontSize = 10.sp,
+                    color = scheme.primary.copy(alpha = 0.7f),
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedButton(
+                    onClick = onDelete,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(28.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = scheme.error)
+                ) {
+                    Text(tr("Delete"), fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ScriptDetailDialog(
+    detail: com.example.lxb_ignition.model.ScriptDetail,
+    onDismiss: () -> Unit,
+    onSaveDelays: (List<Int>) -> Unit
+) {
+    val stepDelays = remember(detail.scriptKey, detail.steps) {
+        mutableStateListOf(*detail.steps.map { it.delayBefore }.toTypedArray())
+    }
+    var hasChanges by remember(detail.scriptKey) { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text(
+                    text = detail.userTask.ifEmpty { detail.scriptKey },
+                    style = MaterialTheme.typography.titleSmall
+                )
+                val app = detail.packageLabel.ifEmpty { detail.packageName }
+                if (app.isNotEmpty()) {
+                    Text(text = app, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
+                }
+            }
+        },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                itemsIndexed(detail.steps) { index, step ->
+                    ScriptStepRow(
+                        step = step,
+                        delayMs = stepDelays.getOrElse(index) { 0 },
+                        onDelayChanged = { newDelay ->
+                            if (index < stepDelays.size) {
+                                stepDelays[index] = newDelay
+                                hasChanges = true
+                            }
+                        }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (hasChanges) {
+                    TextButton(onClick = {
+                        onSaveDelays(stepDelays.toList())
+                        hasChanges = false
+                    }) {
+                        Text(tr("Save Delays"), color = Color(0xFF4CAF50))
+                    }
+                }
+                OutlinedButton(onClick = onDismiss) {
+                    Text(tr("Close"))
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun ScriptStepRow(
+    step: com.example.lxb_ignition.model.ScriptStepInfo,
+    delayMs: Int,
+    onDelayChanged: (Int) -> Unit
+) {
+    val scheme = MaterialTheme.colorScheme
+    val description = step.raw.ifEmpty { "${step.op} ${step.args.joinToString(" ")}" }
+    val opColor = when (step.op.uppercase()) {
+        "TAP" -> Color(0xFF2196F3)
+        "SWIPE" -> Color(0xFF9C27B0)
+        "INPUT" -> Color(0xFFFF9800)
+        "WAIT" -> Color(0xFF607D8B)
+        "BACK" -> Color(0xFFF44336)
+        "DONE" -> Color(0xFF4CAF50)
+        else -> scheme.onSurface
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = scheme.surface),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "${step.index + 1}",
+                    fontSize = 10.sp,
+                    color = scheme.onSurface.copy(alpha = 0.5f),
+                    modifier = Modifier.width(18.dp)
+                )
+                Text(
+                    text = step.op,
+                    fontSize = 11.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    color = opColor
+                )
+                Text(
+                    text = description,
+                    fontSize = 10.sp,
+                    color = scheme.onSurface.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (step.op.uppercase() != "DONE") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = tr("Delay before"),
+                        fontSize = 10.sp,
+                        color = scheme.onSurface.copy(alpha = 0.6f),
+                        modifier = Modifier.width(60.dp)
+                    )
+                    val delayText = remember(delayMs) { mutableStateOf(if (delayMs > 0) delayMs.toString() else "") }
+                    OutlinedTextField(
+                        value = delayText.value,
+                        onValueChange = { v ->
+                            val filtered = v.filter { it.isDigit() }
+                            delayText.value = filtered
+                            onDelayChanged(filtered.toIntOrNull() ?: 0)
+                        },
+                        modifier = Modifier.width(80.dp).height(40.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                        singleLine = true,
+                        placeholder = { Text("0", fontSize = 11.sp) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    Text(
+                        text = "ms",
+                        fontSize = 10.sp,
+                        color = scheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    if (delayMs > 0) {
+                        Text(
+                            text = "(${String.format("%.1f", delayMs / 1000f)}s)",
+                            fontSize = 10.sp,
+                            color = scheme.primary.copy(alpha = 0.7f)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1359,15 +1734,14 @@ fun ChatBubble(message: MainViewModel.ChatMessage) {
         bgColor = Color(0xFF1976D2)
         textColor = Color.White
     } else {
-        val t = message.text
-        bgColor = when {
-            t.startsWith("Task submitted") || t.contains("finished successfully") -> Color(0xFFE8F5E9)
-            t.startsWith("Task id:") -> Color(0xFFE3F2FD)
-            t.contains("failed") || t.contains("error", ignoreCase = true) -> Color(0xFFFFEBEE)
-            t.startsWith("Cancel requested") || t.contains("cancelled") -> Color(0xFFFFF3E0)
-            else -> Color(0xFFE0E0E0)
+        bgColor = when (message.severity) {
+            MainViewModel.MessageSeverity.SUCCESS -> Color(0xFFE8F5E9)
+            MainViewModel.MessageSeverity.INFO -> Color(0xFFE3F2FD)
+            MainViewModel.MessageSeverity.ERROR -> Color(0xFFFFEBEE)
+            MainViewModel.MessageSeverity.WARNING -> Color(0xFFFFF3E0)
+            MainViewModel.MessageSeverity.DEFAULT -> Color(0xFFE0E0E0)
         }
-        textColor = if (bgColor == Color(0xFFE0E0E0)) Color.Black else Color(0xFF212121)
+        textColor = if (message.severity == MainViewModel.MessageSeverity.DEFAULT) Color.Black else Color(0xFF212121)
     }
     Row(
         modifier = Modifier.fillMaxWidth(),

@@ -198,6 +198,10 @@ config.local.py
 /android/LXB-Ignition/.externalNativeBuild
 /android/LXB-Ignition/.cxx
 
+# Signing keys
+*.jks
+*.keystore
+
 # LXB Server 构建产物
 /android/LXB-Ignition/lxb-core.jar
 /android/LXB-Ignition/lxb-server.zip

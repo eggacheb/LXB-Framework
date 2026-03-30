@@ -262,6 +262,42 @@ object TraceEventMapper {
                 messages += if (ms > 0) "Action: WAIT for ${ms}ms." else "Action: WAIT."
             }
             "exec_back_start" -> messages += "Action: BACK key pressed."
+
+            "fsm_script_replay_begin" -> {
+                val scriptKey = obj.optString("script_key", "")
+                val stepCount = obj.optInt("step_count", -1)
+                val msg = buildString {
+                    append("Script replay started")
+                    if (scriptKey.isNotEmpty()) append(" ($scriptKey)")
+                    if (stepCount > 0) append(", $stepCount steps")
+                    append(", running without AI...")
+                }
+                messages += msg
+                runtime = RuntimeUpdate("SCRIPT_REPLAY", "Replaying script...")
+            }
+            "fsm_script_replay_success" -> {
+                val stepsExecuted = obj.optInt("steps_executed", -1)
+                messages += if (stepsExecuted > 0) {
+                    "Script replay completed successfully! ($stepsExecuted steps executed)"
+                } else {
+                    "Script replay completed successfully!"
+                }
+                runtime = RuntimeUpdate("DONE", "Script replay succeeded.", stopAfter = true)
+            }
+            "fsm_script_replay_step_failed", "fsm_script_replay_step_error" -> {
+                val step = obj.optInt("step", -1)
+                val op = obj.optString("op", "")
+                messages += "Script replay failed at step $step ($op), falling back to AI mode..."
+                runtime = RuntimeUpdate("SCRIPT_FALLBACK", "Script replay failed, using AI...")
+            }
+            "fsm_script_exported" -> {
+                val scriptKey = obj.optString("script_key", "")
+                messages += if (scriptKey.isNotEmpty()) {
+                    "Script saved successfully: $scriptKey"
+                } else {
+                    "Script saved successfully."
+                }
+            }
         }
         return TraceMapResult(
             event = event,

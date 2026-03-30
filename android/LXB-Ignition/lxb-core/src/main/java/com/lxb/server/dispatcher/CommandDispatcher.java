@@ -175,6 +175,23 @@ public class CommandDispatcher {
                     response = cortexFacade.handleCortexScheduleUpdate(payload);
                     break;
 
+                // Script replay layer
+                case CommandIds.CMD_CORTEX_SCRIPT_EXPORT:
+                    response = cortexFacade.handleCortexScriptExport(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_SCRIPT_LIST:
+                    response = cortexFacade.handleCortexScriptList(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_SCRIPT_DELETE:
+                    response = cortexFacade.handleCortexScriptDelete(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_SCRIPT_GET:
+                    response = cortexFacade.handleCortexScriptGet(payload);
+                    break;
+                case CommandIds.CMD_CORTEX_SCRIPT_UPDATE:
+                    response = cortexFacade.handleCortexScriptUpdate(payload);
+                    break;
+
                 default:
                     System.out.println(TAG + " Unimplemented command: 0x" +
                             String.format("%02X", frame.cmd));

@@ -60,4 +60,11 @@ public final class CommandIds {
     public static final byte CMD_CORTEX_SCHEDULE_LIST = 0x7B;   // list schedules
     public static final byte CMD_CORTEX_SCHEDULE_REMOVE = 0x7C; // remove schedule by id
     public static final byte CMD_CORTEX_SCHEDULE_UPDATE = 0x7D; // update schedule by id
+
+    // Script replay layer (0x7E-0x81)
+    public static final byte CMD_CORTEX_SCRIPT_EXPORT = 0x7E;   // export successful task as replay script
+    public static final byte CMD_CORTEX_SCRIPT_LIST   = 0x7F;   // list saved scripts
+    public static final byte CMD_CORTEX_SCRIPT_DELETE  = (byte) 0x80; // delete a script by key
+    public static final byte CMD_CORTEX_SCRIPT_GET     = (byte) 0x81; // get script detail by key
+    public static final byte CMD_CORTEX_SCRIPT_UPDATE  = (byte) 0x82; // update script step delays
 }

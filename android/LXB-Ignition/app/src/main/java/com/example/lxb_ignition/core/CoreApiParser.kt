@@ -1,6 +1,9 @@
 package com.example.lxb_ignition.core
 
 import com.example.lxb_ignition.model.ScheduleSummary
+import com.example.lxb_ignition.model.ScriptDetail
+import com.example.lxb_ignition.model.ScriptStepInfo
+import com.example.lxb_ignition.model.ScriptSummary
 import com.example.lxb_ignition.model.TaskSummary
 import org.json.JSONArray
 import org.json.JSONObject
@@ -143,6 +146,115 @@ object CoreApiParser {
             "Schedule removed: $scheduleId"
         } else {
             "Schedule not found: $scheduleId"
+        }
+    }
+
+    fun parseScriptList(payload: ByteArray): Pair<String, List<ScriptSummary>> {
+        val text = payload.toString(Charsets.UTF_8)
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+            ?: return Pair("Invalid script list response: ${text.take(160)}", emptyList())
+        if (!obj.optBoolean("ok", false)) {
+            return Pair("Script list query failed: ${text.take(160)}", emptyList())
+        }
+        val arr = obj.optJSONArray("scripts") ?: JSONArray()
+        val items = mutableListOf<ScriptSummary>()
+        for (i in 0 until arr.length()) {
+            val s = arr.optJSONObject(i) ?: continue
+            val key = s.optString("script_key", "")
+            if (key.isEmpty()) continue
+            val stepsArr = s.optJSONArray("steps")
+            items += ScriptSummary(
+                scriptKey = key,
+                userTask = s.optString("user_task", ""),
+                packageName = s.optString("package_name", ""),
+                packageLabel = s.optString("package_label", ""),
+                targetPage = s.optString("target_page", ""),
+                stepCount = stepsArr?.length() ?: 0,
+                createdAt = s.optLong("created_at", 0L)
+            )
+        }
+        items.sortByDescending { it.createdAt }
+        return Pair("Script list refreshed: ${items.size} items.", items)
+    }
+
+    fun parseScriptExport(payload: ByteArray): Pair<String, String> {
+        val text = payload.toString(Charsets.UTF_8)
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        if (obj == null || !obj.optBoolean("ok", false)) {
+            return Pair("Export script failed: ${text.take(220)}", "")
+        }
+        val scriptKey = obj.optString("script_key", "")
+        return Pair(
+            if (scriptKey.isNotEmpty()) "Script saved: $scriptKey" else "Script saved.",
+            scriptKey
+        )
+    }
+
+    fun parseScriptDelete(payload: ByteArray, scriptKey: String): String {
+        val text = payload.toString(Charsets.UTF_8)
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        return if (obj == null || !obj.optBoolean("ok", false)) {
+            "Delete script failed: ${text.take(220)}"
+        } else if (obj.optBoolean("deleted", false)) {
+            "Script deleted: $scriptKey"
+        } else {
+            "Script not found: $scriptKey"
+        }
+    }
+
+    fun parseScriptGet(payload: ByteArray): Pair<String, JSONObject?> {
+        val text = payload.toString(Charsets.UTF_8)
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        if (obj == null || !obj.optBoolean("ok", false)) {
+            return Pair("Get script failed: ${text.take(220)}", null)
+        }
+        val script = obj.optJSONObject("script")
+        return Pair("Script loaded.", script)
+    }
+
+    fun parseScriptDetail(payload: ByteArray): Pair<String, ScriptDetail?> {
+        val text = payload.toString(Charsets.UTF_8)
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        if (obj == null || !obj.optBoolean("ok", false)) {
+            return Pair("Get script failed: ${text.take(220)}", null)
+        }
+        val s = obj.optJSONObject("script") ?: return Pair("No script in response", null)
+        val stepsArr = s.optJSONArray("steps") ?: JSONArray()
+        val steps = mutableListOf<ScriptStepInfo>()
+        for (i in 0 until stepsArr.length()) {
+            val step = stepsArr.optJSONObject(i) ?: continue
+            val argsArr = step.optJSONArray("args")
+            val args = mutableListOf<String>()
+            if (argsArr != null) {
+                for (j in 0 until argsArr.length()) {
+                    args += argsArr.optString(j, "")
+                }
+            }
+            steps += ScriptStepInfo(
+                index = i,
+                op = step.optString("op", ""),
+                args = args,
+                raw = step.optString("raw", ""),
+                delayBefore = step.optInt("delay_before", 0)
+            )
+        }
+        val detail = ScriptDetail(
+            scriptKey = s.optString("script_key", ""),
+            userTask = s.optString("user_task", ""),
+            packageName = s.optString("package_name", ""),
+            packageLabel = s.optString("package_label", ""),
+            steps = steps
+        )
+        return Pair("Script loaded: ${detail.scriptKey}", detail)
+    }
+
+    fun parseScriptUpdate(payload: ByteArray): String {
+        val text = payload.toString(Charsets.UTF_8)
+        val obj = runCatching { JSONObject(text) }.getOrNull()
+        return if (obj == null || !obj.optBoolean("ok", false)) {
+            "Update script failed: ${text.take(220)}"
+        } else {
+            "Script updated: ${obj.optString("script_key", "")}"
         }
     }
 

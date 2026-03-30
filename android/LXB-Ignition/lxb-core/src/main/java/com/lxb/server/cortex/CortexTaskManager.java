@@ -65,8 +65,10 @@ public class CortexTaskManager {
     private static final String DEFAULT_SCHEDULES_PATH = "/data/local/tmp/lxb/schedules.v1.json";
     private static final String DEFAULT_TASK_RUNS_PATH = "/data/local/tmp/lxb/task_runs.v1.json";
     private static final String DEFAULT_RECORD_ROOT = "/sdcard/Movies/lxb";
+    private static final String DEFAULT_SCRIPTS_DIR = "/data/local/tmp/lxb/scripts";
     private final String schedulesPath;
     private final String taskRunsPath;
+    private final String scriptsDir;
     private final CortexTaskPersistence persistence = new CortexTaskPersistence();
 
     // Dedicated worker/scheduler threads.
@@ -82,6 +84,7 @@ public class CortexTaskManager {
         this.taskMemoryPath = resolveTaskMemoryPath();
         this.schedulesPath = resolveSchedulesPath(this.taskMemoryPath);
         this.taskRunsPath = resolveTaskRunsPath(this.taskMemoryPath);
+        this.scriptsDir = resolveScriptsDir(this.taskMemoryPath);
         loadTaskMemoryFromDisk();
         loadSchedulesFromDisk();
         loadTaskRunsFromDisk();
@@ -166,6 +169,22 @@ public class CortexTaskManager {
             Boolean recordEnabled,
             Boolean useMapOverride
     ) {
+        return submitTask(userTask, packageName, mapPath, startPage, traceMode,
+                traceUdpPort, userPlaybook, recordEnabled, useMapOverride, null);
+    }
+
+    public String submitTask(
+            String userTask,
+            String packageName,
+            String mapPath,
+            String startPage,
+            String traceMode,
+            Integer traceUdpPort,
+            String userPlaybook,
+            Boolean recordEnabled,
+            Boolean useMapOverride,
+            String scriptMode
+    ) {
         return submitTaskInternal(
                 userTask,
                 packageName,
@@ -177,7 +196,8 @@ public class CortexTaskManager {
                 null,
                 userPlaybook,
                 recordEnabled,
-                useMapOverride
+                useMapOverride,
+                scriptMode
         );
     }
 
@@ -193,6 +213,24 @@ public class CortexTaskManager {
             String userPlaybook,
             Boolean recordEnabled,
             Boolean useMapOverride
+    ) {
+        return submitTaskInternal(userTask, packageName, mapPath, startPage, traceMode,
+                traceUdpPort, source, scheduleId, userPlaybook, recordEnabled, useMapOverride, null);
+    }
+
+    private String submitTaskInternal(
+            String userTask,
+            String packageName,
+            String mapPath,
+            String startPage,
+            String traceMode,
+            Integer traceUdpPort,
+            String source,
+            String scheduleId,
+            String userPlaybook,
+            Boolean recordEnabled,
+            Boolean useMapOverride,
+            String scriptMode
     ) {
         long now = System.currentTimeMillis();
         TaskInstance instance = new TaskInstance();
@@ -211,6 +249,11 @@ public class CortexTaskManager {
         instance.createdAt = now;
         instance.recordEnabled = recordEnabled != null && recordEnabled.booleanValue();
 
+        String effectiveScriptMode = scriptMode != null ? scriptMode.trim().toLowerCase() : "auto";
+        if (!effectiveScriptMode.equals("auto") && !effectiveScriptMode.equals("force") && !effectiveScriptMode.equals("off")) {
+            effectiveScriptMode = "auto";
+        }
+
         FsmTaskRequest req = new FsmTaskRequest(
                 userTask,
                 packageName,
@@ -224,6 +267,7 @@ public class CortexTaskManager {
                 memoryHint,
                 instance.recordEnabled,
                 useMapOverride,
+                effectiveScriptMode,
                 instance
         );
         try {
@@ -505,19 +549,87 @@ public class CortexTaskManager {
 
                 TaskSessionHooks hooks = applyTaskSessionStart(instance, req);
                 try {
-                    Map<String, Object> out = fsmEngine.run(
-                            req.userTask,
-                            req.packageName,
-                            req.mapPath,
-                            req.startPage,
-                            req.traceMode,
-                            req.traceUdpPort,
-                            req.userPlaybook,
-                            req.taskMemoryHint,
-                            req.useMapOverride,
-                            instance.taskId,
-                            checker
-                    );
+                    boolean tracePushEnabled = "push".equalsIgnoreCase(req.traceMode)
+                            && req.traceUdpPort != null
+                            && req.traceUdpPort.intValue() > 0;
+
+                    // Script replay attempt (before full AI pipeline)
+                    Map<String, Object> out = null;
+                    String sm = req.scriptMode != null ? req.scriptMode : "auto";
+                    if (!"off".equals(sm)) {
+                        Map<String, Object> matchedScript = findMatchingScript(req.userTask);
+                        if (matchedScript != null) {
+                            if (tracePushEnabled) {
+                                fsmEngine.getTrace().setPushTarget(
+                                        "127.0.0.1", req.traceUdpPort.intValue(), instance.taskId);
+                            }
+
+                            ScriptReplayEngine replayEngine = new ScriptReplayEngine(
+                                    fsmEngine.getExecution(),
+                                    fsmEngine.getTrace()
+                            );
+                            int[] screenSize = fsmEngine.probeScreenSize();
+                            int screenW = screenSize[0];
+                            int screenH = screenSize[1];
+                            ScriptReplayEngine.ReplayResult replayResult =
+                                    replayEngine.replay(matchedScript, instance.taskId, screenW, screenH);
+                            if (replayResult.success) {
+                                fsmEngine.goHomeAndStopApp(instance.taskId,
+                                        stringOrEmpty(matchedScript.get("package_name")));
+
+                                out = new LinkedHashMap<>();
+                                out.put("status", "success");
+                                out.put("task_id", instance.taskId);
+                                out.put("state", "FINISH");
+                                out.put("package_name", stringOrEmpty(matchedScript.get("package_name")));
+                                out.put("package_label", stringOrEmpty(matchedScript.get("package_label")));
+                                out.put("target_page", stringOrEmpty(matchedScript.get("target_page")));
+                                out.put("route_trace", new ArrayList<>());
+                                out.put("command_log", matchedScript.get("steps"));
+                                out.put("llm_history", new ArrayList<>());
+                                out.put("lessons", new ArrayList<>());
+                                out.put("script_replay", true);
+                                out.put("script_key", stringOrEmpty(matchedScript.get("script_key")));
+                                out.put("replay_steps", replayResult.stepsExecuted);
+                            } else if ("force".equals(sm)) {
+                                out = new LinkedHashMap<>();
+                                out.put("status", "failed");
+                                out.put("task_id", instance.taskId);
+                                out.put("state", "FAIL");
+                                out.put("reason", "script_replay_failed:" + replayResult.reason);
+                                out.put("script_replay", true);
+                                out.put("script_key", stringOrEmpty(matchedScript.get("script_key")));
+                            }
+                            // else: auto mode, replay failed -> fallback to AI
+
+                            if (out != null && tracePushEnabled) {
+                                fsmEngine.getTrace().clearPushTarget(instance.taskId);
+                            }
+                        } else if ("force".equals(sm)) {
+                            out = new LinkedHashMap<>();
+                            out.put("status", "failed");
+                            out.put("task_id", instance.taskId);
+                            out.put("state", "FAIL");
+                            out.put("reason", "no_matching_script_found");
+                            out.put("script_replay", true);
+                        }
+                    }
+
+                    if (out == null) {
+                        out = fsmEngine.run(
+                                req.userTask,
+                                req.packageName,
+                                req.mapPath,
+                                req.startPage,
+                                req.traceMode,
+                                req.traceUdpPort,
+                                req.userPlaybook,
+                                req.taskMemoryHint,
+                                req.useMapOverride,
+                                instance.taskId,
+                                checker
+                        );
+                    }
                     instance.finishedAt = System.currentTimeMillis();
                     Object finalState = out.get("state");
                     if (finalState != null) {
@@ -687,6 +799,7 @@ public class CortexTaskManager {
         final Map<String, Object> taskMemoryHint;
         final boolean recordEnabled;
         final Boolean useMapOverride;
+        final String scriptMode;
         final TaskInstance instance;
 
         FsmTaskRequest(String userTask,
@@ -701,6 +814,7 @@ public class CortexTaskManager {
                        Map<String, Object> taskMemoryHint,
                        boolean recordEnabled,
                        Boolean useMapOverride,
+                       String scriptMode,
                        TaskInstance instance) {
             this.userTask = userTask;
             this.packageName = packageName;
@@ -714,6 +828,7 @@ public class CortexTaskManager {
             this.taskMemoryHint = taskMemoryHint;
             this.recordEnabled = recordEnabled;
             this.useMapOverride = useMapOverride;
+            this.scriptMode = scriptMode;
             this.instance = instance;
         }
     }
@@ -1146,6 +1261,9 @@ public class CortexTaskManager {
         row.put("record_started", inst.recordStarted);
         row.put("record_file", inst.recordFilePath);
         row.put("task_summary", inst.taskSummary);
+        if (inst.resultSummary != null && !inst.resultSummary.isEmpty()) {
+            row.put("result_summary", inst.resultSummary);
+        }
         return row;
     }
 
@@ -1172,6 +1290,12 @@ public class CortexTaskManager {
             inst.recordStarted = toBool(row.get("record_started"), false);
             inst.recordFilePath = stringOrEmpty(row.get("record_file"));
             inst.taskSummary = stringOrEmpty(row.get("task_summary"));
+            Object resultObj = row.get("result_summary");
+            if (resultObj instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> resultMap = (Map<String, Object>) resultObj;
+                inst.resultSummary = resultMap;
+            }
             return inst;
         } catch (Exception ignored) {
             return null;
@@ -1359,7 +1483,177 @@ public class CortexTaskManager {
         return DEFAULT_TASK_RUNS_PATH;
     }
 
-    // Future public methods (not implemented yet):
-    // - submitTask(...) -> task_id (async)
-    // - listTasks()
+    // ---- Script Management ----
+
+    private volatile List<Map<String, Object>> cachedScripts = null;
+
+    private List<Map<String, Object>> getScriptsCached() {
+        List<Map<String, Object>> cached = cachedScripts;
+        if (cached != null) return cached;
+        cached = persistence.listScripts(scriptsDir);
+        cachedScripts = cached;
+        return cached;
+    }
+
+    private void invalidateScriptCache() {
+        cachedScripts = null;
+    }
+
+    /**
+     * Export a successful task result as a replay script.
+     * Returns the script map if export succeeded, null otherwise.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> exportScriptFromTaskResult(String taskId) {
+        if (taskId == null || taskId.isEmpty()) {
+            return null;
+        }
+        TaskInstance inst = taskRegistry.get(taskId);
+        if (inst == null || inst.state != TaskState.COMPLETED) {
+            return null;
+        }
+        Map<String, Object> result = inst.resultSummary;
+        if (result == null || result.isEmpty()) {
+            return null;
+        }
+        String status = stringOrEmpty(result.get("status"));
+        if (!"success".equalsIgnoreCase(status)) {
+            return null;
+        }
+
+        Object cmdLogObj = result.get("command_log");
+        if (!(cmdLogObj instanceof List)) {
+            return null;
+        }
+        List<Object> cmdLog = (List<Object>) cmdLogObj;
+        if (cmdLog.isEmpty()) {
+            return null;
+        }
+
+        List<Object> steps = new ArrayList<>();
+        for (Object entry : cmdLog) {
+            if (!(entry instanceof Map)) continue;
+            Map<String, Object> logEntry = (Map<String, Object>) entry;
+            String raw = stringOrEmpty(logEntry.get("raw"));
+            String op = stringOrEmpty(logEntry.get("op"));
+            if (op.isEmpty() && !raw.isEmpty()) {
+                op = raw.split("\\s+")[0].toUpperCase();
+            }
+            if (op.isEmpty()) continue;
+
+            Object argsObj = logEntry.get("args");
+            List<String> args = new ArrayList<>();
+            if (argsObj instanceof List) {
+                for (Object a : (List<Object>) argsObj) {
+                    args.add(a != null ? String.valueOf(a) : "");
+                }
+            }
+
+            Map<String, Object> step = new LinkedHashMap<>();
+            step.put("op", op);
+            step.put("args", args);
+            step.put("raw", raw);
+            steps.add(step);
+        }
+
+        if (steps.isEmpty()) {
+            return null;
+        }
+
+        String scriptKey = "task_" + taskId.replace("-", "").substring(0, Math.min(12, taskId.replace("-", "").length()));
+        String packageName = stringOrEmpty(result.get("package_name"));
+        String packageLabel = stringOrEmpty(result.get("package_label"));
+        String targetPage = stringOrEmpty(result.get("target_page"));
+
+        Map<String, Object> script = new LinkedHashMap<>();
+        script.put("schema_version", "script.v1");
+        script.put("created_at", System.currentTimeMillis());
+        script.put("source_task_id", taskId);
+        script.put("user_task", inst.userTask != null ? inst.userTask : "");
+        script.put("script_key", scriptKey);
+        script.put("package_name", packageName);
+        script.put("package_label", packageLabel);
+        script.put("target_page", targetPage);
+        script.put("use_map", toBool(result.get("use_map"), true));
+        script.put("map_source", stringOrEmpty(result.get("map_source")));
+        script.put("route_trace", copyList(result.get("route_trace"), 32));
+        script.put("steps", steps);
+
+        persistence.saveScript(scriptsDir, scriptKey, script);
+        invalidateScriptCache();
+        return script;
+    }
+
+    public List<Map<String, Object>> listScripts() {
+        return getScriptsCached();
+    }
+
+    public boolean deleteScript(String scriptKey) {
+        if (scriptKey == null || scriptKey.isEmpty()) return false;
+        boolean result = persistence.deleteScript(scriptsDir, scriptKey);
+        if (result) invalidateScriptCache();
+        return result;
+    }
+
+    public Map<String, Object> getScript(String scriptKey) {
+        if (scriptKey == null || scriptKey.isEmpty()) return null;
+        return persistence.loadScript(scriptsDir, scriptKey);
+    }
+
+    @SuppressWarnings("unchecked")
+    public boolean updateScriptStepDelays(String scriptKey, List<Number> delays) {
+        if (scriptKey == null || scriptKey.isEmpty() || delays == null) return false;
+        Map<String, Object> script = persistence.loadScript(scriptsDir, scriptKey);
+        if (script == null) return false;
+        Object stepsObj = script.get("steps");
+        if (!(stepsObj instanceof List)) return false;
+        List<Object> steps = (List<Object>) stepsObj;
+        for (int i = 0; i < steps.size() && i < delays.size(); i++) {
+            Object stepObj = steps.get(i);
+            if (stepObj instanceof Map) {
+                Map<String, Object> step = (Map<String, Object>) stepObj;
+                int d = delays.get(i).intValue();
+                if (d > 0) {
+                    step.put("delay_before", d);
+                } else {
+                    step.remove("delay_before");
+                }
+            }
+        }
+        persistence.saveScript(scriptsDir, scriptKey, script);
+        invalidateScriptCache();
+        return true;
+    }
+
+    /**
+     * Find a matching script for the given user task text.
+     */
+    public Map<String, Object> findMatchingScript(String userTask) {
+        if (userTask == null || userTask.trim().isEmpty()) return null;
+        String normalizedTask = userTask.trim().toLowerCase();
+        List<Map<String, Object>> scripts = listScripts();
+        for (Map<String, Object> script : scripts) {
+            String scriptTask = stringOrEmpty(script.get("user_task")).toLowerCase();
+            if (!scriptTask.isEmpty() && scriptTask.equals(normalizedTask)) {
+                return script;
+            }
+        }
+        return null;
+    }
+
+    public String getScriptsDir() {
+        return scriptsDir;
+    }
+
+    private static String resolveScriptsDir(String taskMemoryPath) {
+        String override = System.getProperty("lxb.scripts.dir");
+        if (override != null && !override.trim().isEmpty()) {
+            return override.trim();
+        }
+        File p = new File(taskMemoryPath).getParentFile();
+        if (p != null) {
+            return new File(p, "scripts").getAbsolutePath();
+        }
+        return DEFAULT_SCRIPTS_DIR;
+    }
 }

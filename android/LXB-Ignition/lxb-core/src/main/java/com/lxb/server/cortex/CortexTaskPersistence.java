@@ -123,6 +123,61 @@ public final class CortexTaskPersistence {
         }
     }
 
+    // ---- Script persistence ----
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> loadScript(String scriptDir, String scriptKey) {
+        Object parsed = parseJsonFile(scriptDir + "/" + scriptKey + ".json");
+        if (parsed instanceof Map) {
+            return (Map<String, Object>) parsed;
+        }
+        return null;
+    }
+
+    public void saveScript(String scriptDir, String scriptKey, Map<String, Object> script) {
+        try {
+            String path = scriptDir + "/" + scriptKey + ".json";
+            File dir = new File(scriptDir);
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            Files.write(new File(path).toPath(), Json.stringify(script).getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listScripts(String scriptDir) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        File dir = new File(scriptDir);
+        if (!dir.exists() || !dir.isDirectory()) {
+            return result;
+        }
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return result;
+        }
+        for (File f : files) {
+            if (!f.isFile() || !f.getName().endsWith(".json")) {
+                continue;
+            }
+            try {
+                String json = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+                Object parsed = Json.parse(json);
+                if (parsed instanceof Map) {
+                    result.add((Map<String, Object>) parsed);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return result;
+    }
+
+    public boolean deleteScript(String scriptDir, String scriptKey) {
+        File f = new File(scriptDir + "/" + scriptKey + ".json");
+        return f.exists() && f.delete();
+    }
+
     private void writeJsonAtomically(String path, String json) throws Exception {
         File target = new File(path);
         File parent = target.getParentFile();

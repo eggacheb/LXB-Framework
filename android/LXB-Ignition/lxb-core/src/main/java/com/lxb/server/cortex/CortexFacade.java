@@ -11,7 +11,9 @@ import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
@@ -365,6 +367,7 @@ public class CortexFacade {
             boolean recordEnabled = toBool(req.get("record_enabled"), false);
             Object useMapObj = req.get("use_map");
             Boolean useMapOverride = useMapObj != null ? Boolean.valueOf(toBool(useMapObj, true)) : null;
+            String scriptMode = stringOrEmpty(req.get("script_mode"));
 
             if (userTask.isEmpty()) {
                 return err("user_task is required");
@@ -379,7 +382,8 @@ public class CortexFacade {
                     traceUdpPort > 0 ? traceUdpPort : null,
                     userPlaybook.isEmpty() ? null : userPlaybook,
                     Boolean.valueOf(recordEnabled),
-                    useMapOverride
+                    useMapOverride,
+                    scriptMode.isEmpty() ? null : scriptMode
             );
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("ok", true);
@@ -743,6 +747,138 @@ public class CortexFacade {
             Map<String, Object> ev = new LinkedHashMap<>();
             ev.put("err", String.valueOf(e));
             trace.event("cortex_schedule_update_err", ev);
+            return err(String.valueOf(e));
+        }
+    }
+
+    // ---- Script Replay API handlers ----
+
+    /**
+     * Export a successful task result as a replay script.
+     *
+     * Payload JSON: { "task_id": "..." }
+     */
+    public byte[] handleCortexScriptExport(byte[] payload) {
+        try {
+            String s = payload != null ? new String(payload, StandardCharsets.UTF_8) : "{}";
+            Map<String, Object> req = Json.parseObject(s);
+            String taskId = stringOrEmpty(req.get("task_id"));
+            if (taskId.isEmpty()) {
+                return err("task_id is required");
+            }
+            Map<String, Object> script = taskManager.exportScriptFromTaskResult(taskId);
+            if (script == null) {
+                return err("export failed: task not found, not completed, or no command log");
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("script_key", script.get("script_key"));
+            out.put("script", script);
+            trace.event("fsm_script_exported", out);
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * List saved scripts.
+     *
+     * Payload JSON (optional): { "limit": 50 }
+     */
+    public byte[] handleCortexScriptList(byte[] payload) {
+        try {
+            java.util.List<Map<String, Object>> scripts = taskManager.listScripts();
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("scripts", scripts);
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * Delete a script by key.
+     *
+     * Payload JSON: { "script_key": "..." }
+     */
+    public byte[] handleCortexScriptDelete(byte[] payload) {
+        try {
+            String s = payload != null ? new String(payload, StandardCharsets.UTF_8) : "{}";
+            Map<String, Object> req = Json.parseObject(s);
+            String scriptKey = stringOrEmpty(req.get("script_key"));
+            if (scriptKey.isEmpty()) {
+                return err("script_key is required");
+            }
+            boolean deleted = taskManager.deleteScript(scriptKey);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("deleted", deleted);
+            out.put("script_key", scriptKey);
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * Get script detail by key.
+     *
+     * Payload JSON: { "script_key": "..." }
+     */
+    public byte[] handleCortexScriptGet(byte[] payload) {
+        try {
+            String s = payload != null ? new String(payload, StandardCharsets.UTF_8) : "{}";
+            Map<String, Object> req = Json.parseObject(s);
+            String scriptKey = stringOrEmpty(req.get("script_key"));
+            if (scriptKey.isEmpty()) {
+                return err("script_key is required");
+            }
+            Map<String, Object> script = taskManager.getScript(scriptKey);
+            if (script == null) {
+                return err("script not found: " + scriptKey);
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("script", script);
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
+            return err(String.valueOf(e));
+        }
+    }
+
+    /**
+     * Update script step delays.
+     *
+     * Payload JSON: { "script_key": "...", "step_delays": [0, 2000, 500, ...] }
+     */
+    @SuppressWarnings("unchecked")
+    public byte[] handleCortexScriptUpdate(byte[] payload) {
+        try {
+            String s = payload != null ? new String(payload, StandardCharsets.UTF_8) : "{}";
+            Map<String, Object> req = Json.parseObject(s);
+            String scriptKey = stringOrEmpty(req.get("script_key"));
+            if (scriptKey.isEmpty()) {
+                return err("script_key is required");
+            }
+            Object delaysObj = req.get("step_delays");
+            if (!(delaysObj instanceof List)) {
+                return err("step_delays array is required");
+            }
+            List<Number> delays = new ArrayList<>();
+            for (Object o : (List<Object>) delaysObj) {
+                delays.add(o instanceof Number ? (Number) o : 0);
+            }
+            boolean updated = taskManager.updateScriptStepDelays(scriptKey, delays);
+            if (!updated) {
+                return err("update failed: script not found or invalid");
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("ok", true);
+            out.put("script_key", scriptKey);
+            return ok(Json.stringify(out));
+        } catch (Exception e) {
             return err(String.valueOf(e));
         }
     }

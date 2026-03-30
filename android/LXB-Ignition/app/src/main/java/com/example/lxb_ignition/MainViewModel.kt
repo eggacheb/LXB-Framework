@@ -19,6 +19,8 @@ import com.example.lxb_ignition.core.TaskRuntimeController
 import com.example.lxb_ignition.map.MapSyncManager
 import com.example.lxb_ignition.model.CoreRuntimeStatus
 import com.example.lxb_ignition.model.ScheduleSummary
+import com.example.lxb_ignition.model.ScriptDetail
+import com.example.lxb_ignition.model.ScriptSummary
 import com.example.lxb_ignition.model.TaskSummary
 import com.example.lxb_ignition.model.TaskRuntimeUiStatus
 import com.example.lxb_ignition.model.WirelessBootstrapStatus
@@ -175,11 +177,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Chat view: one-shot task session (no cross-task context)
     enum class ChatRole { USER, SYSTEM }
+    enum class MessageSeverity { DEFAULT, SUCCESS, INFO, ERROR, WARNING }
 
     data class ChatMessage(
         val id: Long,
         val role: ChatRole,
         val text: String,
+        val severity: MessageSeverity = MessageSeverity.DEFAULT,
         val ts: Long = System.currentTimeMillis()
     )
 
@@ -217,6 +221,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _scheduleList = MutableStateFlow<List<ScheduleSummary>>(emptyList())
     val scheduleList: StateFlow<List<ScheduleSummary>> = _scheduleList.asStateFlow()
+
+    private val _scriptList = MutableStateFlow<List<ScriptSummary>>(emptyList())
+    val scriptList: StateFlow<List<ScriptSummary>> = _scriptList.asStateFlow()
+
+    private val _currentScriptDetail = MutableStateFlow<ScriptDetail?>(null)
+    val currentScriptDetail: StateFlow<ScriptDetail?> = _currentScriptDetail.asStateFlow()
+
+    val showSaveScriptDialog = MutableStateFlow(false)
+    val lastCompletedTaskId = MutableStateFlow("")
 
     // Tasks tab: schedule form
     val scheduleName = MutableStateFlow("")
@@ -273,6 +286,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         registerWirelessBootstrapReceiver()
         startCoreProbeLoop()
+        observeTaskCompletion()
         // Migrate stale/invalid port values (e.g., "0") to default.
         persistNormalizedLxbPortIfNeeded()
         viewModelScope.launch(Dispatchers.IO) {
@@ -793,6 +807,179 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleRecordEnabled.value = false
     }
 
+    // ----- Script management -----
+
+    fun refreshScriptList() {
+        val port = currentLxbPortOrNull() ?: run {
+            appendSystemMessage("Invalid lxb-core port, cannot refresh script list.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                coreClientGateway.withClient(port = port) { client ->
+                    val resp = client.sendCommand(
+                        CommandIds.CMD_CORTEX_SCRIPT_LIST,
+                        ByteArray(0),
+                        timeoutMs = 5_000
+                    )
+                    CoreApiParser.parseScriptList(resp)
+                }
+            }.getOrElse { e -> Pair("Script list query failed: ${e.message}", emptyList<ScriptSummary>()) }
+
+            withContext(Dispatchers.Main) {
+                _scriptList.value = result.second
+                appendLog("[SCRIPT] ${result.first}")
+            }
+        }
+    }
+
+    fun exportScript(taskId: String) {
+        val port = currentLxbPortOrNull() ?: run {
+            appendSystemMessage("Invalid lxb-core port, cannot export script.")
+            return
+        }
+        if (taskId.isBlank()) {
+            appendSystemMessage("task_id is empty.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                coreClientGateway.withClient(port = port) { client ->
+                    val payloadJson = org.json.JSONObject()
+                        .put("task_id", taskId)
+                        .toString()
+                    val resp = client.sendCommand(
+                        CommandIds.CMD_CORTEX_SCRIPT_EXPORT,
+                        payloadJson.toByteArray(Charsets.UTF_8),
+                        timeoutMs = 6_000
+                    )
+                    CoreApiParser.parseScriptExport(resp)
+                }
+            }.getOrElse { e -> Pair("Export script failed: ${e.message}", "") }
+
+            withContext(Dispatchers.Main) {
+                appendLog("[SCRIPT] ${result.first}")
+                appendSystemMessage(result.first)
+                showSaveScriptDialog.value = false
+                if (result.second.isNotEmpty()) {
+                    refreshScriptList()
+                }
+            }
+        }
+    }
+
+    fun deleteScript(scriptKey: String) {
+        val port = currentLxbPortOrNull() ?: run {
+            appendSystemMessage("Invalid lxb-core port, cannot delete script.")
+            return
+        }
+        if (scriptKey.isBlank()) {
+            appendSystemMessage("script_key is empty.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                coreClientGateway.withClient(port = port) { client ->
+                    val payloadJson = org.json.JSONObject()
+                        .put("script_key", scriptKey)
+                        .toString()
+                    val resp = client.sendCommand(
+                        CommandIds.CMD_CORTEX_SCRIPT_DELETE,
+                        payloadJson.toByteArray(Charsets.UTF_8),
+                        timeoutMs = 4_000
+                    )
+                    CoreApiParser.parseScriptDelete(resp, scriptKey)
+                }
+            }.getOrElse { e -> "Delete script failed: ${e.message}" }
+
+            withContext(Dispatchers.Main) {
+                appendLog("[SCRIPT] $result")
+                appendSystemMessage(result)
+                refreshScriptList()
+            }
+        }
+    }
+
+    fun promptSaveScript(taskId: String) {
+        lastCompletedTaskId.value = taskId
+        showSaveScriptDialog.value = true
+    }
+
+    fun dismissSaveScriptDialog() {
+        showSaveScriptDialog.value = false
+    }
+
+    fun loadScriptDetail(scriptKey: String) {
+        val port = currentLxbPortOrNull() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                coreClientGateway.withClient(port = port) { client ->
+                    val payloadJson = org.json.JSONObject()
+                        .put("script_key", scriptKey)
+                        .toString()
+                    val resp = client.sendCommand(
+                        CommandIds.CMD_CORTEX_SCRIPT_GET,
+                        payloadJson.toByteArray(Charsets.UTF_8),
+                        timeoutMs = 5_000
+                    )
+                    CoreApiParser.parseScriptDetail(resp)
+                }
+            }.getOrElse { e -> Pair("Load script detail failed: ${e.message}", null) }
+
+            withContext(Dispatchers.Main) {
+                _currentScriptDetail.value = result.second
+                if (result.second == null) {
+                    appendSystemMessage(result.first)
+                }
+            }
+        }
+    }
+
+    fun clearScriptDetail() {
+        _currentScriptDetail.value = null
+    }
+
+    fun updateScriptStepDelays(scriptKey: String, delays: List<Int>) {
+        val port = currentLxbPortOrNull() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                coreClientGateway.withClient(port = port) { client ->
+                    val arr = org.json.JSONArray()
+                    delays.forEach { arr.put(it) }
+                    val payloadJson = org.json.JSONObject()
+                        .put("script_key", scriptKey)
+                        .put("step_delays", arr)
+                        .toString()
+                    val resp = client.sendCommand(
+                        CommandIds.CMD_CORTEX_SCRIPT_UPDATE,
+                        payloadJson.toByteArray(Charsets.UTF_8),
+                        timeoutMs = 5_000
+                    )
+                    CoreApiParser.parseScriptUpdate(resp)
+                }
+            }.getOrElse { e -> "Update script failed: ${e.message}" }
+
+            withContext(Dispatchers.Main) {
+                appendLog("[SCRIPT] $result")
+                appendSystemMessage(result)
+                loadScriptDetail(scriptKey)
+            }
+        }
+    }
+
+    private fun observeTaskCompletion() {
+        viewModelScope.launch {
+            var previousPhase = ""
+            taskRuntimeUiStatus.collect { status ->
+                if (previousPhase != "DONE" && status.phase == "DONE" && status.taskId.isNotEmpty()) {
+                    promptSaveScript(status.taskId)
+                    refreshTaskListOnDevice()
+                }
+                previousPhase = status.phase
+            }
+        }
+    }
+
     // ----- LLM config and test -----
 
     private fun currentDeviceLlmSettings(): DeviceLlmSettings {
@@ -1165,10 +1352,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun appendSystemMessage(text: String) {
+        val severity = inferMessageSeverity(text)
         val msg = ChatMessage(
             id = nextMsgId++,
             role = ChatRole.SYSTEM,
-            text = UiMessageLocalizer.localize(uiLang.value, text)
+            text = UiMessageLocalizer.localize(uiLang.value, text),
+            severity = severity
         )
         val current = _chatMessages.value.toMutableList()
         current.add(msg)
@@ -1176,6 +1365,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             current.subList(0, current.size - 100).clear()
         }
         _chatMessages.value = current
+    }
+
+    private fun inferMessageSeverity(text: String): MessageSeverity {
+        val t = text.lowercase()
+        return when {
+            t.startsWith("task submitted") || t.contains("finished successfully")
+                || t.contains("schedule added") || t.contains("schedule updated") -> MessageSeverity.SUCCESS
+            t.startsWith("task id:") || t.startsWith("task sent")
+                || t.startsWith("server is running") -> MessageSeverity.INFO
+            t.contains("failed") || t.contains("error") || t.contains("not running")
+                || t.contains("invalid") -> MessageSeverity.ERROR
+            t.startsWith("cancel requested") || t.contains("cancelled") -> MessageSeverity.WARNING
+            else -> MessageSeverity.DEFAULT
+        }
     }
 
     override fun onCleared() {

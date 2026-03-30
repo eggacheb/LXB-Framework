@@ -209,7 +209,14 @@ class TaskRuntimeController(
         }
         updateIndicator(update.phase, update.detail, taskId)
         if (update.stopAfter) {
-            stopIndicator()
+            // Delay stopIndicator so StateFlow collectors can observe the
+            // terminal phase (DONE/FAILED/CANCELLED) before it resets to IDLE.
+            // Without this delay, StateFlow conflation causes the terminal
+            // phase to be invisible to collectors like observeTaskCompletion().
+            scope.launch(mainDispatcher) {
+                kotlinx.coroutines.delay(150L)
+                stopIndicator()
+            }
         }
     }
 }
