@@ -261,6 +261,68 @@ public class CortexFsmEngine {
     }
 
     /**
+     * Wake screen, swipe, and input PIN to unlock the device.
+     * Called by CortexTaskManager before script replay so scheduled tasks
+     * can run even when the screen is locked.
+     *
+     * @return true if the device is confirmed unlocked, false otherwise.
+     */
+    public boolean ensureDeviceUnlocked(String taskId, String packageName) {
+        Context ctx = new Context(taskId);
+        loadUnlockPolicyFromConfig(ctx);
+        return ensureUnlockedBeforeRoute(ctx, packageName != null ? packageName : "", 1);
+    }
+
+    /**
+     * Lock the screen after a successful script replay, mirroring the
+     * auto-lock-after-task behavior of the AI path.
+     */
+    public void autoLockDevice(String taskId) {
+        Context ctx = new Context(taskId);
+        loadUnlockPolicyFromConfig(ctx);
+        if (!ctx.autoLockAfterTask) {
+            return;
+        }
+        int before = getScreenStateCode();
+        if (before != 1) {
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", taskId);
+            ev.put("before_state", before);
+            ev.put("result", "skip_not_unlocked_state");
+            trace.event("script_replay_auto_lock", ev);
+            return;
+        }
+
+        boolean locked = false;
+        int after = before;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            boolean powerOk = sendKeyClick(KEYCODE_POWER);
+            sleepQuiet(250);
+            after = getScreenStateCode();
+            locked = (after == 0 || after == 2);
+
+            Map<String, Object> ev = new LinkedHashMap<>();
+            ev.put("task_id", taskId);
+            ev.put("attempt", attempt);
+            ev.put("power_ok", powerOk);
+            ev.put("after_state", after);
+            ev.put("locked", locked);
+            trace.event("script_replay_auto_lock_attempt", ev);
+
+            if (locked) {
+                break;
+            }
+        }
+
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("task_id", taskId);
+        ev.put("before_state", before);
+        ev.put("after_state", after);
+        ev.put("locked", locked);
+        trace.event("script_replay_auto_lock", ev);
+    }
+
+    /**
      * Expose a thin system_control wrapper so TaskManager can run task-level
      * lifecycle hooks (e.g., DND/recording) without changing FSM state flow.
      */

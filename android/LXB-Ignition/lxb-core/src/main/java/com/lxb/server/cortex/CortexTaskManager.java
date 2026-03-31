@@ -564,18 +564,25 @@ public class CortexTaskManager {
                                         "127.0.0.1", req.traceUdpPort.intValue(), instance.taskId);
                             }
 
-                            ScriptReplayEngine replayEngine = new ScriptReplayEngine(
-                                    fsmEngine.getExecution(),
-                                    fsmEngine.getTrace()
-                            );
-                            int[] screenSize = fsmEngine.probeScreenSize();
-                            int screenW = screenSize[0];
-                            int screenH = screenSize[1];
-                            ScriptReplayEngine.ReplayResult replayResult =
-                                    replayEngine.replay(matchedScript, instance.taskId, screenW, screenH);
-                            if (replayResult.success) {
-                                fsmEngine.goHomeAndStopApp(instance.taskId,
-                                        stringOrEmpty(matchedScript.get("package_name")));
+                            String scriptPkg = stringOrEmpty(matchedScript.get("package_name"));
+                            boolean unlocked = fsmEngine.ensureDeviceUnlocked(
+                                    instance.taskId, scriptPkg);
+
+                            ScriptReplayEngine.ReplayResult replayResult = null;
+                            if (unlocked) {
+                                ScriptReplayEngine replayEngine = new ScriptReplayEngine(
+                                        fsmEngine.getExecution(),
+                                        fsmEngine.getTrace()
+                                );
+                                int[] screenSize = fsmEngine.probeScreenSize();
+                                int screenW = screenSize[0];
+                                int screenH = screenSize[1];
+                                replayResult =
+                                        replayEngine.replay(matchedScript, instance.taskId, screenW, screenH);
+                            }
+                            if (replayResult != null && replayResult.success) {
+                                fsmEngine.goHomeAndStopApp(instance.taskId, scriptPkg);
+                                fsmEngine.autoLockDevice(instance.taskId);
 
                                 out = new LinkedHashMap<>();
                                 out.put("status", "success");
@@ -596,11 +603,14 @@ public class CortexTaskManager {
                                 out.put("status", "failed");
                                 out.put("task_id", instance.taskId);
                                 out.put("state", "FAIL");
-                                out.put("reason", "script_replay_failed:" + replayResult.reason);
+                                String failReason = replayResult != null
+                                        ? "script_replay_failed:" + replayResult.reason
+                                        : "device_unlock_failed";
+                                out.put("reason", failReason);
                                 out.put("script_replay", true);
                                 out.put("script_key", stringOrEmpty(matchedScript.get("script_key")));
                             }
-                            // else: auto mode, replay failed -> fallback to AI
+                            // else: auto mode, replay/unlock failed -> fallback to AI
 
                             if (out != null && tracePushEnabled) {
                                 fsmEngine.getTrace().clearPushTarget(instance.taskId);
