@@ -25,11 +25,19 @@ public class ScriptReplayEngine {
 
     private final ExecutionEngine execution;
     private final TraceLogger trace;
+    private final CortexFsmEngine.CancellationChecker cancellationChecker;
 
     public ScriptReplayEngine(ExecutionEngine execution,
                               TraceLogger trace) {
+        this(execution, trace, null);
+    }
+
+    public ScriptReplayEngine(ExecutionEngine execution,
+                              TraceLogger trace,
+                              CortexFsmEngine.CancellationChecker cancellationChecker) {
         this.execution = execution;
         this.trace = trace;
+        this.cancellationChecker = cancellationChecker;
     }
 
     public static class ReplayResult {
@@ -88,6 +96,14 @@ public class ScriptReplayEngine {
 
         int executed = 0;
         for (int i = 0; i < steps.size(); i++) {
+            if (cancellationChecker != null && cancellationChecker.isCancelled()) {
+                Map<String, Object> cancelEv = new LinkedHashMap<>();
+                cancelEv.put("task_id", taskId);
+                cancelEv.put("step", i);
+                cancelEv.put("steps_executed", executed);
+                trace.event("fsm_script_replay_cancelled", cancelEv);
+                return new ReplayResult(false, "cancelled_by_user", executed);
+            }
             Object stepObj = steps.get(i);
             if (!(stepObj instanceof Map)) {
                 return new ReplayResult(false, "invalid_step_at:" + i, executed);

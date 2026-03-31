@@ -572,7 +572,8 @@ public class CortexTaskManager {
                             if (unlocked) {
                                 ScriptReplayEngine replayEngine = new ScriptReplayEngine(
                                         fsmEngine.getExecution(),
-                                        fsmEngine.getTrace()
+                                        fsmEngine.getTrace(),
+                                        checker
                                 );
                                 int[] screenSize = fsmEngine.probeScreenSize();
                                 int screenW = screenSize[0];
@@ -583,6 +584,11 @@ public class CortexTaskManager {
                             if (replayResult != null && replayResult.success) {
                                 fsmEngine.goHomeAndStopApp(instance.taskId, scriptPkg);
                                 fsmEngine.autoLockDevice(instance.taskId);
+
+                                Map<String, Object> termEv = new LinkedHashMap<>();
+                                termEv.put("task_id", instance.taskId);
+                                termEv.put("state", "FINISH");
+                                fsmEngine.getTrace().event("fsm_state_enter", termEv);
 
                                 out = new LinkedHashMap<>();
                                 out.put("status", "success");
@@ -599,6 +605,11 @@ public class CortexTaskManager {
                                 out.put("script_key", stringOrEmpty(matchedScript.get("script_key")));
                                 out.put("replay_steps", replayResult.stepsExecuted);
                             } else if ("force".equals(sm)) {
+                                Map<String, Object> termEv = new LinkedHashMap<>();
+                                termEv.put("task_id", instance.taskId);
+                                termEv.put("state", "FAIL");
+                                fsmEngine.getTrace().event("fsm_state_enter", termEv);
+
                                 out = new LinkedHashMap<>();
                                 out.put("status", "failed");
                                 out.put("task_id", instance.taskId);
